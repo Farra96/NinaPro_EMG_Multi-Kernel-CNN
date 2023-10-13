@@ -11,3 +11,6 @@ This GitHub repository accounts for studying sEMG classification algorithms tail
 - A more complex model that includes CBAM, featuring TCN, Feature Spatial Attention Module, and Feature Channel Attention Module.
 - A framework for testing the effect of Transfer Learning on new users varying the number of data available.
 
+
+An article will be added soon.
+
