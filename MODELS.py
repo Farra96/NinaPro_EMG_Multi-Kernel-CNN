@@ -1,3 +1,4 @@
+
 import re
 import time
 import os
@@ -5,8 +6,9 @@ import sys
 import random
 import copy
 import csv
-
+import itertools
 import math
+import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
@@ -346,10 +348,10 @@ class MultiKernelConv2D_grid(nn.Module):
                 # Padding is 'circular' to keep consistency in space (ch) dim (circular shape)
                 Conv2d_Circular8(1, self.ch, tuple(self.kernels[k]),
                                  pad_LRTB=(round(self.kernels[k][1] / 2), round(self.kernels[k][1] / 2), 0, 0)),
-                nn.BatchNorm2d(self.ch),  # ATTENTION! -> kernel_sizes[:][1] MUST BE ODD FOR EACH TOWER
+                nn.BatchNorm2d(self.ch),  # ATTENTION! -> kernel_sizes[:][1] MUST BE ODD FOR EACH TOWER OR RAISES ERROR
                 nn.ZeroPad2d((0, 0, self.padd_list[k][0], self.padd_list[k][1])),  # -> zero padding along time
                 self.activation_fun,
-                self.pool_layer,  # ATTENTION! -> change this MaxPool for different windows dimensions
+                self.pool_layer,  
                 nn.Dropout2d(0.2),
                 SeparableConv2d(self.ch, 2 * self.ch, 1, kernel_size=3),  # Expanding feature space (out = 2* input)
                 nn.BatchNorm2d(2 * self.ch),
@@ -359,7 +361,6 @@ class MultiKernelConv2D_grid(nn.Module):
             for k in range(np.shape(self.kernels)[0]))
 
     def forward(self, inputs):
-        # now you can build a single output from the list of convolutions
         out = [module(inputs) for module in self.towers]  # -> uncomment to get concatenated
 
         # To check flow and print outputs
@@ -539,8 +540,16 @@ class MKCNN_grid_AN(nn.Module):
                     self.pool_type(2),
                     nn.Dropout2d(0.2),
                     nn.Flatten(),
-                    nn.Linear(2 * dict['N_SepConv'], 128),
+                    nn.Linear(2* dict['N_SepConv'], 128),
                     nn.Linear(128, self.num_domains))
+
+                # self.domain_classifier = nn.Sequential( 
+                #     nn.Conv2d(self.in_ch, dict['N_Conv_conc'], dict['Kernel_Conv_conc'],
+                #               padding=int((dict['Kernel_Conv_conc'] - 1) / 2)),                                               
+                #     nn.Flatten(),
+                #     nn.Linear(dict['N_Conv_conc'] * 70, 512),
+                #     nn.Linear(512, 128),
+                #     nn.Linear(128, self.num_domains))
         else:
             raise ValueError('Module not found for second output!')
 
@@ -568,8 +577,25 @@ class MKCNN_grid_AN(nn.Module):
             for param in layer.parameters():
                 param.requires_grad = False
 
+    def initialize_domain_class_weights(self):
+        for layer in self.domain_classifier:
+            if isinstance(layer, (nn.Linear, nn.Conv2d)):
+                nn.init.xavier_normal_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, 0)
+            elif isinstance(layer, SeparableConv2d):
+                nn.init.xavier_normal_(layer.depthwise.weight)
+                nn.init.xavier_normal_(layer.pointwise.weight)
+                if layer.depthwise.bias is not None:
+                    nn.init.constant_(layer.depthwise.bias, 0)
+                if layer.pointwise.bias is not None:
+                    nn.init.constant_(layer.pointwise.bias, 0)
+
+
+
+
 # %% Training types
-def train_model_standard(model, loss_fun, optimizer, dataloaders, scheduler, num_epochs=150, precision=1e-8,
+def train_model_standard(model, loss_fun, optimizer, dataloaders, scheduler, num_epochs=100, precision=1e-8,
                          patience=10, patience_increase=10, device=None, l2=None):
     if not device:
         if torch.cuda.is_available():
@@ -688,7 +714,7 @@ def train_model_standard(model, loss_fun, optimizer, dataloaders, scheduler, num
     return best_state, tr_epoch_loss_vec, val_epoch_loss_vec
 
 
-def pre_train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, num_epochs=150, precision=1e-8,
+def pre_train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, num_epochs=100, precision=1e-8,
                             patience=10, patience_increase=10, device=None):
     if not device:
         if torch.cuda.is_available():
@@ -820,7 +846,7 @@ def train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, num_
     best_loss = float('inf')
 
     softmax_block = nn.Softmax(dim=1)
-    triplet_loss = nn.TripletMarginLoss(margin=margin, p=p_dist)
+    triplet_loss = nn.TripletMarginLoss(margin=margin, p=p_dist, reduction='mean')
 
     best_state = {'epoch': 0, 'state_dict': copy.deepcopy(model.state_dict()),
                   'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}
@@ -1090,34 +1116,38 @@ def get_l2_regularization(model, lambda_l2):
 
 #%% TCN_CBAM
 class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dropout=0.05):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dropout=0.05, act_fun = None):
         super(TCNBlock, self).__init__()
 
         # self.conv = Conv2d_Circular8(in_channels, out_channels, kernel_size, stride=stride, pad_LRTB=(1, 1, 0, 0))
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride)
         self.batchnorm = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
+        
+        if act_fun:
+            self.act_fun = act_fun
+        else: 
+            self.act_fun = nn.ReLU() 
 
     def forward(self, x):
         x = self.conv(x)
         x = self.batchnorm(x)
-        x = self.relu(x)
+        x = self.act_fun(x)
         x = self.dropout(x)
         return x
 
 
 # %% Channel spatial
 class FCAM(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=(1, 1)):
+    def __init__(self, in_channels, out_channels, kernel_size=(1, 1), pool_kernel=(4, 12)):
         super(FCAM, self).__init__()
         self.avg_p = nn.Sequential(
-            nn.AvgPool2d(kernel_size=(5, 12)),
+            nn.AvgPool2d(kernel_size=pool_kernel),
             nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size),
             nn.ReLU(),
             nn.Conv2d(in_channels=out_channels, out_channels=in_channels, kernel_size=kernel_size))
         self.max_p = nn.Sequential(
-            nn.MaxPool2d(kernel_size=(5, 12)),
+            nn.MaxPool2d(kernel_size=(pool_kernel)),
             nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size),
             nn.ReLU(),
             nn.Conv2d(in_channels=out_channels, out_channels=in_channels, kernel_size=kernel_size))
@@ -1148,46 +1178,72 @@ class FSAM(nn.Module):
 
 # %% FINAL MODEL
 class TCN_ch_sp_ATT(nn.Module):
-    def __init__(self, wnd_len, n_classes, in_ch=1, out_ch=32, tcn_kernels=None, drop=0.2, l2_lambda=None):
+    def __init__(self, wnd_len, n_classes, in_ch=1, out_ch=32, tcn_kernels=None, drop=0.5, l2_lambda=None, 
+                 dom_out = None, num_domains = None, act_fun = None):
         super(TCN_ch_sp_ATT, self).__init__()
 
         if tcn_kernels is None:
             tcn_kernels = [3, 7, 7]
+            
+        if act_fun:
+            self.act_fun = act_fun
+        else: 
+            self.act_fun = nn.ReLU()  
 
         self.l2_lambda = l2_lambda
-        self.avg = round(wnd_len / 6)
+        self.avg = round(wnd_len / 5)
         self.TCN = nn.Sequential(
             TCNBlock(in_channels=in_ch, out_channels=out_ch, kernel_size=(tcn_kernels[0], 1), dropout=drop),
             TCNBlock(in_channels=out_ch, out_channels=2 * out_ch, kernel_size=(tcn_kernels[1], 1), dropout=drop),
             TCNBlock(in_channels=2 * out_ch, out_channels=4 * out_ch, kernel_size=(tcn_kernels[2], 1), dropout=drop),
         )
-        self.avg1 = nn.AvgPool2d(kernel_size=(self.avg, 1))
+        # self.avg1 = nn.AvgPool2d(kernel_size=(self.avg, 1))
+        self.avg1 = nn.AdaptiveAvgPool2d(output_size=((4, 12)))
         self.avg2 = nn.Sequential(
             nn.Conv2d(in_channels=4 * out_ch, out_channels=4 * out_ch, kernel_size=(1, 1), padding=0),
-            nn.BatchNorm2d(4 * out_ch), nn.ReLU(),
-            nn.AvgPool2d(kernel_size=(self.avg, 1)))
+            nn.BatchNorm2d(4 * out_ch), 
+            self.act_fun,
+            # nn.AvgPool2d(kernel_size=(self.avg, 1)))
+            nn.AdaptiveAvgPool2d(output_size=(4, 12)))
         self.avg3 = nn.Sequential(
             nn.Conv2d(in_channels=4 * out_ch, out_channels=4 * out_ch, kernel_size=(3, 3), padding=1),
             # # I use the circular padding over channel axis to keep spatial relation between them
             # Conv2d_Circular8(in_channels=4 * out_ch, out_channels=4 * out_ch, kernel_size=(3, 3),
             #                  pad_LRTB=(1, 1, 0, 0)),
-            nn.BatchNorm2d(4 * out_ch), nn.ReLU(),
-            nn.AvgPool2d(kernel_size=(self.avg, 1)))
+            nn.BatchNorm2d(4 * out_ch),
+            self.act_fun,
+            # nn.AvgPool2d(kernel_size=(self.avg, 1)))
+            nn.AdaptiveAvgPool2d(output_size=(4, 12)))
 
-        self.FCAM = FCAM(in_channels=384, out_channels=48)
+        self.FCAM = FCAM(in_channels= 384, out_channels=48)
         self.FSAM = FSAM()
         self.conv_block = nn.Sequential(
             nn.Conv2d(in_channels=384, out_channels=384, kernel_size=(1, 1)),
             nn.BatchNorm2d(384),
-            nn.ReLU(),
+            self.act_fun,
             nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(384 * 5 * 12, 256),
+            nn.Dropout(drop),
+            nn.Linear(384 * 4 * 12, 256),
+            nn.Dropout(drop/2),
             nn.Linear(256, 128),
             nn.Linear(128, n_classes)
         )
 
-    def forward(self, x):
+        # Here it possible to decide if forcing the first linear layer to be domain-invariant (output2 == nn.Linear) or no.
+        self.output2 = dom_out
+        if self.output2 == nn.Flatten:
+            self.domain_classifier = nn.Sequential(
+                nn.Linear(384 * 4 * 12, 256),
+                nn.Linear(256, 128),
+                nn.Linear(128, num_domains)
+            )
+        elif self.output2 == nn.Linear:
+            self.domain_classifier = nn.Sequential(
+                nn.Linear(256, 128),
+                nn.Linear(128, num_domains)
+            )
+
+    def forward(self, x, alpha = None):
 
         for layer in self.TCN:
             # TCN forward
@@ -1206,18 +1262,30 @@ class TCN_ch_sp_ATT(nn.Module):
         # print(f'FSAM OUTPUT: {fsam.shape} ')
         x = x * fsam
         # print(f'FSAM X FCAM_OUT: {x.shape}')
+
+
+        out_dom = None
         for layer2 in self.conv_block:
             # print(f'Input: -> {x.shape}')
             x = layer2.forward(x)
             # print(f'Module: -> {layer2} \n Output: -> {x.shape}')
-        l2 = get_l2_regularization(self, lambda_l2=self.l2_lambda)
+        # l2 = get_l2_regularization(self, lambda_l2=self.l2_lambda)
+            if alpha is not None:
+                if isinstance(layer2, self.output2):  # the domain classifier can start AFTER the flatten or AFTER the first linear layer
+                    # dims = x.size()
+                    # print(f'SIZE: {dims}')
+                    rev_feature = GradientReversalLayer.apply(x, alpha)
+                    # print(f'REVERSED OUT: {rev_feature.shape}')
 
-        return x, l2
+                    out_dom = self.domain_classifier(rev_feature)
+                # print('Output: ', x.shape, '\n\n')
+
+        return x, out_dom
 
 # %% TL results (too much params to pass)
 
-def get_TL_results(model, tested_sub_df, path_to_save, list_of_rep_to_use, exe_labels,
-                   loss_fn, optimizer, num_epochs,device = None, scheduler=None, filename=None, **dataloader_param):
+def get_TL_results(model, tested_sub_df, path_to_save, train_rep, valid_rep, test_rep, exe_labels, loss_fn, optimizer,
+                    train_type = 'Standard', num_epochs = 10, device = None, scheduler=None, filename=None, **dataloader_param):
 
     if not os.path.exists(path_to_save):
         os.makedirs(path_to_save)
@@ -1227,50 +1295,111 @@ def get_TL_results(model, tested_sub_df, path_to_save, list_of_rep_to_use, exe_l
 
     # Check unique sub
     if len(np.unique(tested_sub_df['sub'])) != 1:
-        raise ValueError('More than one subject in Dataframe for TL experiment!')
+        raise ValueError('Zero or More than one subject in Dataframe for TL experiment!')
     sub = tested_sub_df['sub'].values[0]
 
     if filename is None:
-        filename = f'TL_Sub{sub}_on_{len(list_of_rep_to_use)}_Reps'
+        filename = f'TL_Sub{sub}_on_{len(train_rep)}_Reps'
     else:
-        filename = f'{filename}_TL_Sub{sub}_on_{len(list_of_rep_to_use)}_Reps'  # + \
+        filename = f'{filename}_TL_Sub{sub}_on_{len(train_rep)}_Reps'  # + \
     #    re.split(r'\d+', os.path.basename(os.path.normpath(state_dict_path)))[1][:-4]
+    
+    test = tested_sub_df[~tested_sub_df['rep'].isin(test_rep)]
+    test_set = Pandas_Dataset(test.groupby('sample_index'))
+    test_dl = data.DataLoader(test_set, batch_size=64, shuffle= True, drop_last=False)
+    
+    train, valid = None, None
+    if train_rep != []:      # If I'm training
 
-    if list_of_rep_to_use != []:      # If I'm training
-        # Divide dataloader based on number of repetition
-        train = tested_sub_df[tested_sub_df['rep'].isin(list_of_rep_to_use)]
-        train_set = Pandas_Dataset(train.groupby('sample_index'))
+        if train_type == 'Standard':
+            # Divide dataloader based on number of repetition
+            train = tested_sub_df.loc[tested_sub_df['rep'].isin(train_rep)]
+            valid = tested_sub_df.loc[tested_sub_df['rep'].isin(valid_rep)]
+            train_set = Pandas_Dataset(train.groupby('sample_index'))
+            valid_set = Pandas_Dataset(valid.groupby('sample_index'))
+
+        elif train_type == 'Reversal':
+            # Filter out test rep
+            tested_sub_df = tested_sub_df.loc[~tested_sub_df['rep'].isin(test_rep)]
+             # Refactor rep from 0 to 4 for domain classifier
+            tested_sub_df['rep'] = pd.factorize(tested_sub_df['rep'])[0]
+            # For each subject, only one exercise for each repetition is done. let's take a casual repetition as validation
+            grouped= tested_sub_df.groupby('label')
+            valid_sample_idx = []
+            for lbl, group_df in grouped:
+                # Get 20% of each exercise as validation
+                num_samples = int(len(group_df['sample_index'].unique()) * 0.2) 
+                print(f'Label: {lbl}    Valid samples: {num_samples}    Total:{len(group_df["sample_index"].unique())}')
+                valid_sample_idx.append(group_df.sample(n=num_samples, random_state=29)['sample_index'].values)
+            # Concatenate the arrays in valid_sample_idx_list vertically
+            valid_sample_idx = np.concatenate(valid_sample_idx)
+            # Retrieve the sampled rows from the original DataFrame using the sampled indices
+            valid = tested_sub_df.loc[tested_sub_df['sample_index'].isin(valid_sample_idx)]
+            train = tested_sub_df.loc[~tested_sub_df['sample_index'].isin(valid_sample_idx)]
+            if (len(valid) + len(train) != len(tested_sub_df)):
+                raise ValueError(' Train and validation splitting is not consistent')
+            train_set = Pandas_Dataset(train.groupby('sample_index'), target_col='rep')
+            valid_set = Pandas_Dataset(valid.groupby('sample_index'), target_col='rep')
+
+            # Re-initialize the weights of domain classifier, previously used to classify subjects,
+            # now will be use for different repetitions
+            model.initialize_domain_class_weights()
+            filename = filename +'_Reversal'
+
+        # elif train_type == 'Triplet':           # 4 output
+        #     train_set = dataframe_dataset_triplet(df_train, groupby_col='sample_index', target_col='sub')
+        #     valid_set = dataframe_dataset_triplet(df_val, groupby_col='sample_index', target_col='sub')
+
+        # elif train_type == 'JS':        # 3 output
+        #     train_set = dataframe_dataset_JS(df_train, groupby_col='sample_index', target_col='sub')
+        #     valid_set = dataframe_dataset_JS(df_val, groupby_col='sample_index', target_col='sub')
+
+
         train_dl = data.DataLoader(train_set, **dataloader_param)
+        valid_dl = data.DataLoader(valid_set, **dataloader_param)
 
-        test = tested_sub_df[~tested_sub_df['rep'].isin(list_of_rep_to_use)]
-        test_set = Pandas_Dataset(test.groupby('sample_index'))
-        test_dl = data.DataLoader(test_set, **dataloader_param)
-
-        best_weights, tr_losses, val_losses = train_model_standard(model=model, loss_fun=loss_fn,
-                                                                   optimizer=optimizer,
-                                                                   dataloaders={"train": train_dl,
-                                                                                "val": test_dl},
-                                                                   num_epochs=num_epochs, precision=1e-5,
-                                                                   scheduler=scheduler,
-                                                                   patience=10, device=device,
-                                                                   patience_increase=7)
+        if train_type == 'Standard':
+            best_weights, tr_losses, val_losses = train_model_standard(model=model, loss_fun=loss_fn,
+                                                                    optimizer=optimizer,
+                                                                    dataloaders={"train": train_dl,
+                                                                                    "val": valid_dl},
+                                                                    num_epochs=num_epochs, precision=1e-5,
+                                                                    scheduler=scheduler,
+                                                                    patience=4, device=device,
+                                                                    patience_increase=5)
+        elif train_type == 'Reversal': 
+            best_weights, tr_losses, val_losses, tr_dom_losses, val_dom_losses, tr_task_losses, val_task_losses = \
+            train_model_reversal_gradient(model=model, loss_fun=loss_fn, loss_fun_domain=loss_fn,
+                                      lamba=0.5, optimizer=optimizer, scheduler=scheduler,
+                                      dataloaders={"train": train_dl, "val": valid_dl}, device=device,
+                                      num_epochs=num_epochs , precision=1e-6, patience=8, patience_increase=7)
+            
 
         # Save state dict of the model
         if not os.path.exists(path_to_save + 'Best_States/'):
             os.makedirs(path_to_save + 'Best_States/')
-        torch.save(best_weights['state_dict'], path_to_save + 'Best_States/' + filename + '.pth')
+        torch.save(best_weights['state_dict'], path_to_save + f'Best_States/{filename}_Val_{valid_rep}.pth')
+
 
         # % PlotLoss and Confusion Matrix for subject
         if not os.path.exists(path_to_save + 'Plot/'):
             os.makedirs(path_to_save + 'Plot/')
         PlotLoss(tr_losses, val_loss=val_losses,
-                 title=f'TL over Sub: {str(sub)} over {len(list_of_rep_to_use)} repetitions',
+                 title=f'TL over Sub: {str(sub)} over {len(train_rep)} repetitions',
                  path_to_save=path_to_save + 'Plot/', filename=filename + '.png')
+        
+        if train_type == 'Reversal' or train_type == 'JS':
+            PlotLoss(tr_dom_losses, val_loss=val_dom_losses,
+            title=f'TL over Sub: {str(sub)} over {len(train_rep)} repetitions',
+            path_to_save=path_to_save + '/Plot/',
+            filename=f'{filename}_DOMAIN_ONLY.png')
+
+            PlotLoss(tr_task_losses, val_loss=val_task_losses,
+                title=f'TL over Sub: {str(sub)} over {len(train_rep)} repetitions',
+                path_to_save=path_to_save + '/Plot/',
+                filename=f'{filename}_TASK_ONLY.png')
 
     else:       # If I'm not training
-        test = tested_sub_df[~tested_sub_df['rep'].isin(list_of_rep_to_use)]
-        test_set = Pandas_Dataset(test.groupby('sample_index'))
-        test_dl = data.DataLoader(test_set, **dataloader_param)
 
         best_weights = {'epoch': 0} # need dict      to write in csv file
         val_losses = [0, 0]         # need iterable
@@ -1299,11 +1428,11 @@ def get_TL_results(model, tested_sub_df, path_to_save, list_of_rep_to_use, exe_l
 
         cm = metrics.confusion_matrix(y_true=y_true, y_pred=y_pred)
         # Fancy confusion matrix
-        plot_confusion_matrix(cm, target_names=exe_labels, title=f'TL for subject {sub} over {len(list_of_rep_to_use)}_Reps',
-                              path_to_save=path_to_save + 'Conf_Matrix/' + filename + '.png')
+        plot_confusion_matrix(cm, target_names=exe_labels, title=f'TL for subject {sub} over {len(train_rep)}_Reps',
+                              path_to_save=path_to_save + 'Conf_Matrix/' + f'{filename}_Val_{valid_rep}.png')
 
     # csv file
-    header_net = ['Name', 'Tested_sub', f'Repetition Used', 'Best Val Loss',
+    header_net = ['Name', 'Tested_sub', f'Train Repetitions', 'Val Repetition', 'Best Val Loss',
                   'Accuracy', 'Kappa', 'F1_score', 'Best Epoch', 'Num trainable Param']
 
     with open(path_to_save + f'Evals.csv', 'a', newline='') as myFile:
@@ -1311,10 +1440,10 @@ def get_TL_results(model, tested_sub_df, path_to_save, list_of_rep_to_use, exe_l
         if myFile.tell() == 0:
             writer.writerow(header_net)
         # Create the row of values
-        row = [filename, sub, list_of_rep_to_use, min(val_losses),
-               metrics.accuracy_score(y_true=y_true, y_pred=y_pred),
-               metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights='quadratic'),
-               metrics.f1_score(y_true=y_true, y_pred=y_pred, average='macro'),
+        row = [filename, sub, train_rep, valid_rep, min(val_losses),
+               metrics.balanced_accuracy_score(y_true=y_true, y_pred=y_pred),
+               metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights=None),
+               metrics.f1_score(y_true=y_true, y_pred=y_pred, average='weighted'),
                best_weights['epoch'], sum([p.numel() for p in model.parameters() if p.requires_grad])]
         writer.writerow(row)
 
@@ -1721,7 +1850,7 @@ LEARNING
     MULTIK_GRID = MultiKernelConv2D_grid(n_params)
 
     # INPUT = torch.randn([128, 1, 20, 10])
-    INPUT = torch.randn([128, 1, 400, 12])
+    INPUT = torch.randn([128, 1, 300, 12])
     OUTPUT_MULTIK_GRID = MULTIK_GRID.forward(INPUT)
     print(OUTPUT_MULTIK_GRID.shape)
 
@@ -1737,7 +1866,7 @@ LEARNING
     print(f"Number of trainable parameters: {num_params}")
 
     # %% MKCNN wnd_lenXch
-    wnd_len = 40
+    wnd_len = 300
     device = torch.device('cuda')
     kernels_gap = [g for g in range(0, 3 * round(wnd_len / 20), round(wnd_len / 20))]
     kernel_sizes = np.full((3, 5, 2), [1, 3])
