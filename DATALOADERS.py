@@ -1,5 +1,6 @@
 # import scipy
 import numpy as np
+import time 
 import os
 # import pathlib
 import re
@@ -20,12 +21,12 @@ from Data_Processing_Utils import windowing_signal, mapping_labels
 # personalized index & groupby function
 class Pandas_Dataset(data.Dataset):
 
-    def __init__(self, df_grouped_by_samples, return_sub=False):
+    def __init__(self, df_grouped_by_samples, target_col = None):
         self.grouped = df_grouped_by_samples
         self.channels = [i for i in df_grouped_by_samples.obj.columns if 'ch' in i]
         self.indices = list(df_grouped_by_samples.indices)
-        self.return_sub = return_sub
-
+        self.target_col = target_col
+        
     def __len__(self):
         return len(self.grouped)
 
@@ -36,10 +37,10 @@ class Pandas_Dataset(data.Dataset):
         # picking only one label for each sample
         label = torch.tensor(picked_smp.loc[:, ['label']].head(1).values[0][0]).type(torch.int8)
 
-        if self.return_sub:
+        if self.target_col:
             # picking only one subject
-            sub = torch.tensor(picked_smp.loc[:, ['sub']].head(1).values[0][0]).type(torch.int8)
-            return sample, label, sub
+            label2 = torch.tensor(picked_smp.loc[:, [self.target_col]].head(1).values[0][0]).type(torch.int8)
+            return sample, label, label2
         else:
 
             # It's missing the part in which I Normalize the data for each subject, or for each subject and channels
@@ -50,63 +51,163 @@ class Pandas_Dataset(data.Dataset):
 class dataframe_dataset_triplet(data.Dataset):
 
     def __init__(self, dataframe, groupby_col, target_col, sample_frac=1.0):
-        self.df = dataframe
+        # self.df = dataframe
         self.groupby_col = groupby_col
         self.target_col = target_col
         self.sample_frac = sample_frac
         self.channels = [i for i in dataframe.columns if 'ch' in i]
 
         self.groups = dataframe.groupby(groupby_col)
-        self.indices = {i: group.sample(frac=sample_frac).index for i, group in self.groups}
-        self.keys = list(self.indices.keys())
+        self.keys = list(self.groups.groups.keys())
 
         # to delete df.query
         self.labels = np.unique(dataframe['label'])
         self.subjects = np.unique(dataframe[target_col])
 
-        self.sample_indices_by_label_sub = {}
+        # mapping keys for any combnation of label_sub pair
+        self.sample_key_by_label_sub = {}
         for label, sub in dataframe[['label', 'sub']].drop_duplicates().values:
-            self.sample_indices_by_label_sub[(label, sub)] = np.unique(dataframe.query(f"label == {label} and {'sub'} == {sub}")[
-                'sample_index'].values)
-        # # TODO: Store less data in dataloaders for triplet and reversal
+            mask = (dataframe['label'] == label) & (dataframe['sub'] == sub)
+            sample_keys = dataframe[mask]['sample_index'].unique()
+            self.sample_key_by_label_sub[(label, sub)] = sample_keys
+        # Precompute tensor of samples for each group
+        self.precomputed_samples = {}
+        for idx, (group_key, group_indices) in enumerate(self.groups.indices.items(), start=1):
+            samples = torch.tensor(dataframe.iloc[group_indices][self.channels].values).type(torch.FloatTensor)
+            self.precomputed_samples[group_key] = samples
+
         #  it should work even with: -> dataframe.query(f"label == {label} and {'sub'} == {sub}")[
         #         'sample_index'].values         ->> so you store less data !!!!!!!!! ADDED NP.UNIQUE()
 
     def __getitem__(self, idx):
-        group_key = self.keys[idx]
-        group_indices = self.indices[group_key]
-        sample = torch.tensor(self.df.loc[group_indices, self.channels].values).type(torch.float32)
-        label = torch.tensor(self.df.loc[group_indices, 'label'].head(1).values[0]).type(torch.int8)
-        # sub = self.df.loc[group_indices, self.target_col].head(1).values[0]
 
-        # # take a unique random value from groupby_col (in this case, sample index) after filtered dataframe
-        # idx_sample = np.random.choice(self.df.query(f'{self.target_col} != {sub} and label == {label}')[self.groupby_col], size=1)[0]
-        # # extract the casual positive sample
-        # pos_sample = torch.tensor(self.df.loc[self.df[self.groupby_col] == idx_sample, self.channels].values)\
-        #     .type(torch.float32)
-        #
-        # idx_sample = np.random.choice(self.df.query(f'label != {label}')[self.groupby_col], size=1)[0]
-        # neg_sample = torch.tensor(self.df.loc[self.df[self.groupby_col] == idx_sample, self.channels].values)\
-        #     .type(torch.float32)
+        # start_time = time.time()
+        group_key = self.keys[idx]
+
+        #group_indices = self.indices[group_key]    # Those are the indexes of datframe to be found, but slow
+        # end_time = time.time() - start_time
+        # print(f"\nTime taken for group_key and group_indices: {end_time}")
+
+        # start_time = time.time()
+        sample = self.precomputed_samples[group_key]
+        #sample = torch.tensor(self.df.iloc[group_indices][self.channels]).type(torch.FloatTensor)
+        # end_time = time.time() - start_time
+        # print(f"Time taken for sample tensor creation: {end_time}")
+
+        # start_time = time.time()
+        # label = torch.tensor(self.df.loc[self.indices[group_key], 'label'].values[0]) #.type(torch.int8)
+        # label = torch.tensor(self.df.loc[self.groups.get_group(group_key).index[0], 'label'])
+        label = torch.tensor(self.groups.get_group(group_key)['label'].values[0])
+        # end_time = time.time() - start_time
+        # print(f"Time taken for label tensor creation: {end_time}")
+        # sub = self.df.loc[group_indices, self.target_col].head(1).values[0]
 
         # After deleting query
         # positive
         # pos_sub = np.random.choice([k for k in self.subjects if k != sub])  # Changed bc in case of one single sub raises error (e.g. test_dataloader)
+        # start_time = time.time()
         pos_sub = np.random.choice(self.subjects)
-        pos_indexes = self.sample_indices_by_label_sub[(int(label), pos_sub)]
-        pos_sample = torch.tensor(self.groups.get_group(np.random.choice(pos_indexes, size=1)[0])[self.channels].values) \
-            .type(torch.float32)
+        pos_key = np.random.choice(self.sample_key_by_label_sub[(int(label), pos_sub)], size =1)[0]
+        # pos_sample = torch.tensor(self.groups.get_group(pos_index)[self.channels].values).type(torch.FloatTensor)
+        pos_sample = self.precomputed_samples[pos_key]
+        # end_time = time.time() - start_time
+        # print(f"Time taken for positive sample tensor creation: {end_time}")
         # negative
+        # start_time = time.time()
         neg_lbl = np.random.choice([k for k in self.labels if k != label])
-        neg_indexes = self.sample_indices_by_label_sub[(neg_lbl, np.random.choice(self.subjects))]
-        neg_sample = torch.tensor(
-                self.groups.get_group(np.random.choice(neg_indexes, size=1)[0])[self.channels].values) \
-                .type(torch.float32)
+        neg_sub = np.random.choice([k for k in self.subjects if k != pos_sub])
+        neg_key = np.random.choice(self.sample_key_by_label_sub[(neg_lbl, neg_sub)], size = 1)[0]
+        neg_sample = self.precomputed_samples[neg_key]
+        # neg_sample = torch.tensor(self.groups.get_group(neg_index)[self.channels].values).type(torch.FloatTensor)
+        # end_time = time.time() - start_time
+        # print(f"Time taken for negative sample tensor creation: {end_time}\n")
 
         return sample, label, pos_sample, neg_sample
 
     def __len__(self):
         return len(self.keys)
+
+#OLD
+# class dataframe_dataset_triplet(data.Dataset):
+
+#     def __init__(self, dataframe, groupby_col, target_col, sample_frac=1.0):
+#         self.df = dataframe
+#         self.groupby_col = groupby_col
+#         self.target_col = target_col
+#         self.sample_frac = sample_frac
+#         self.channels = [i for i in dataframe.columns if 'ch' in i]
+
+#         self.groups = dataframe.groupby(groupby_col)
+#         self.indices = {i: group.sample(frac=sample_frac).index for i, group in self.groups}
+#         self.keys = list(self.indices.keys())
+
+#         # to delete df.query
+#         self.labels = np.unique(dataframe['label'])
+#         self.subjects = np.unique(dataframe[target_col])
+
+#         self.sample_indices_by_label_sub = {}
+#         for label, sub in dataframe[['label', 'sub']].drop_duplicates().values:
+#             self.sample_indices_by_label_sub[(label, sub)] = np.unique(dataframe.query(f"label == {label} and {'sub'} == {sub}")[
+#                 'sample_index'].values)
+
+#         # Pre-compute tensors for each group and store them
+#         self.precomputed_samples = {}
+#         for key, indices in self.indices.items():
+#             self.precomputed_samples[key] = torch.tensor(self.df.loc[indices, self.channels].values).type(torch.FloatTensor)
+#         #  it should work even with: -> dataframe.query(f"label == {label} and {'sub'} == {sub}")[
+#         #         'sample_index'].values         ->> so you store less data !!!!!!!!! ADDED NP.UNIQUE()
+
+#     def __getitem__(self, idx):
+
+#         start_time = time.time()
+#         group_key = self.keys[idx]
+#         #group_indices = self.indices[group_key]    # Those are the indexes of datframe to be found, but slow
+#         end_time = time.time() - start_time
+#         print(f"\nTime taken for group_key and group_indices: {end_time}")
+
+#         start_time = time.time()
+#         sample = self.precomputed_samples[group_key]
+#         #sample = torch.tensor(self.df.iloc[group_indices][self.channels]).type(torch.FloatTensor)
+#         end_time = time.time() - start_time
+#         print(f"Time taken for sample tensor creation: {end_time}")
+
+#         start_time = time.time()
+#         label = torch.tensor(self.df.loc[group_indices, 'label'].values[0]) #.type(torch.int8)
+#         end_time = time.time() - start_time
+#         print(f"Time taken for label tensor creation: {end_time}")
+#         # sub = self.df.loc[group_indices, self.target_col].head(1).values[0]
+
+#         # # take a unique random value from groupby_col (in this case, sample index) after filtered dataframe
+#         # idx_sample = np.random.choice(self.df.query(f'{self.target_col} != {sub} and label == {label}')[self.groupby_col], size=1)[0]
+#         # # extract the casual positive sample
+#         # pos_sample = torch.tensor(self.df.loc[self.df[self.groupby_col] == idx_sample, self.channels].values)\
+#         #     .type(torch.float32)
+#         #
+#         # idx_sample = np.random.choice(self.df.query(f'label != {label}')[self.groupby_col], size=1)[0]
+#         # neg_sample = torch.tensor(self.df.loc[self.df[self.groupby_col] == idx_sample, self.channels].values)\
+#         #     .type(torch.float32)
+
+#         # After deleting query
+#         # positive
+#         # pos_sub = np.random.choice([k for k in self.subjects if k != sub])  # Changed bc in case of one single sub raises error (e.g. test_dataloader)
+#         start_time = time.time()
+#         pos_sub = np.random.choice(self.subjects)
+#         pos_index =np.random.choice(self.sample_indices_by_label_sub[(int(label), pos_sub)], size =1)[0]
+#         pos_sample = torch.tensor(self.groups.get_group(pos_index)[self.channels].values).type(torch.FloatTensor)
+#         end_time = time.time() - start_time
+#         print(f"Time taken for positive sample tensor creation: {end_time}")
+#         # negative
+#         start_time = time.time()
+#         neg_lbl = np.random.choice([k for k in self.labels if k != label])
+#         neg_index = np.random.choice(self.sample_indices_by_label_sub[(neg_lbl, np.random.choice(self.subjects))], size = 1)[0]
+#         neg_sample = torch.tensor(self.groups.get_group(neg_index)[self.channels].values).type(torch.FloatTensor)
+#         end_time = time.time() - start_time
+#         print(f"Time taken for negative sample tensor creation: {end_time}\n")
+
+#         return sample, label, pos_sample, neg_sample
+
+#     def __len__(self):
+#         return len(self.keys)
 
 #%%
 class dataframe_dataset_JS(data.Dataset):
@@ -214,14 +315,16 @@ class JSDLoss(torch.nn.Module):
         """
 
         # Concatenate the embeddings along the batch dimension
-        e = torch.cat((e1, e2), dim=0)
+        # e = torch.cat((e1, e2), dim=0)
 
-        # Compute the logits (not normalized log probabilities) for each embedding
-        logits = F.log_softmax(e, dim=0)
+        # # Compute the logits (not normalized log probabilities) for each embedding
+        # logits = F.log_softmax(e, dim=0)
 
-        # Compute the normalized probabilities for each embedding
-        p = torch.exp(logits)
-        p1, p2 = torch.split(p, split_size_or_sections=e1.size(0), dim=0)
+        # # Compute the normalized probabilities for each embedding
+        # p = torch.exp(logits)
+        # p1, p2 = torch.split(p, split_size_or_sections=e1.size(0), dim=0)
+        p1 = F.softmax(e1, dim=1)
+        p2 = F.softmax(e2, dim=1)
 
         # Compute the mean probability distributions for e1 and e2
         m = 0.5 * (p1 + p2)
@@ -239,7 +342,7 @@ class CenterLoss(torch.nn.Module):
         self.alpha = alpha
 
         # Create center parameter for each class
-        self.centers = torch.nn.Parameter(torch.randn(num_classes, feat_dim))
+        self.centers = torch.nn.Parameter(torch.randn(num_classes, feat_dim)).to(device)
         self.device = device
 
     def forward(self, x, labels):
@@ -257,6 +360,10 @@ class CenterLoss(torch.nn.Module):
 
 
         # Gather the centers corresponding to the labels
+        # print('LABELS: ', labels.device)
+        # print(f'X: {x.device}')
+        # print('CENTERS: ',self.centers.device)
+
         centers_batch = self.centers[labels].to(self.device)
 
 
@@ -302,17 +409,3 @@ def calculate_jensen_shannon_divergence(model1, model2):
     jsd = 0.5 * (F.kl_div(weights1, m) + F.kl_div(weights2, m))
 
     return jsd
-# def calculate_jensen_shannon_divergence(model1, model2):
-#     # Get the weights of both models
-#     weights1 = torch.cat([param.view(-1) for param in model1.parameters()])
-#     weights2 = torch.cat([param.view(-1) for param in model2.parameters()])
-#
-#     # Normalize the weights
-#     weights1 = F.softmax(weights1, dim=0)
-#     weights2 = F.softmax(weights2, dim=0)
-#
-#     # Calculate Jensen-Shannon Divergence
-#     m = 0.5 * (weights1 + weights2)
-#     jsd = 0.5 * (F.kl_div(weights1, m) + F.kl_div(weights2, m))
-#
-#     return jsd
