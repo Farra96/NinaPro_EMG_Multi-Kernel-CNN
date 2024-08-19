@@ -13,7 +13,7 @@ from scipy.signal import butter, filtfilt, freqz
 
 
 # %% Path
-# NinaPro_data_path = '/home/ricardo/DB6/'
+# NinaPro_data_path = '/home/ricardo/DB2/'
 # This function will automatically unpack the different database on the servers
 
 # %%
@@ -101,7 +101,7 @@ def Unpack_Database(NinaPro_data_path, database_number: int, path_to_save=None):
                     exe_num = np.unique(struct['restimulus'])
                     n_gesture = len(exe_num)
                     repetitions = np.unique(struct['repetition'])
-                    if len(repetitions) != 7:  # -> 6 Repetition for DB3
+                    if len(repetitions) != 7:  # -> 6 Repetition for DB3 and DB2
                         print('#' * 100 + '\n Number Repetitions not - consistent')
 
                     ############ COMMON PART ############# consider make it a function
@@ -138,7 +138,7 @@ def Unpack_Database(NinaPro_data_path, database_number: int, path_to_save=None):
             exe_num = np.unique(struct['restimulus'])
             n_gesture = len(exe_num)
             repetitions = np.unique(struct['repetition'])
-            if len(repetitions) != 7:  # -> 6 Repetition for DB3
+            if len(repetitions) != 7:  # -> 6 Repetition for DB7
                 print('#' * 100 + '\n Number Repetitions not - consistent')
 
             ############ COMMON PART ############# consider make it a function
@@ -395,109 +395,37 @@ def Norm_each_sub_by_own_param(df, mode='sub', norm_type: str = None,
 
 
 # %% Database 1,3,6,7
+
 def mapping_labels(lab, NinaPro_Database_Num: int):
     """
-    :param lab:                  Label to change
-    :param NinaPro_Database_Num: The database to change label from
-    :return:
+    Maps old labels to new labels based on the specified NinaPro Database Number.
+
+    Parameters:
+    - lab (int): Original label to be mapped.
+    - NinaPro_Database_Num (int): Identifier for the NinaPro Database.
+
+    Returns:
+    - int or None: Mapped label, or None if the original label is not found.
+
+    Raises:
+    - ValueError: If the NinaPro Database Number is not supported.
     """
-    if NinaPro_Database_Num == 1:
-        if lab == 34:
-            mapped_lab = 0
-        elif lab == 46:
-            mapped_lab = 1
-        elif lab == 48:
-            mapped_lab = 2
-        elif lab == 42:
-            mapped_lab = 3
-        elif lab == 39:
-            mapped_lab = 4
-        elif lab == 49:
-            mapped_lab = 5
-        elif lab == 43:
-            mapped_lab = 6
-        elif lab == 33:
-            mapped_lab = 7
-        elif lab == 9:
-            mapped_lab = 8
-        elif lab == 36:
-            mapped_lab = 9
-        elif lab == 25:
-            mapped_lab = 10
-        elif lab == 26:
-            mapped_lab = 11
-        elif lab == 17:
-            mapped_lab = 12
-        elif lab == 18:
-            mapped_lab = 13
-        # elif lab == 53:
-        #     mapped_lab = 14   -> # Rest
-        else:
-            print('#' * 100 + '\nMapping Failed! Class not found!\n' + '#' * 100)
-            mapped_lab = None
+    label_maps = {
+        1: {34: 0, 46: 1, 48: 2, 42: 3, 39: 4, 49: 5, 43: 6, 33: 7, 9: 8, 36: 9, 25: 10, 26: 11, 17: 12, 18: 13},
+        2: {22: 0, 34: 1, 36: 2, 30: 3, 27: 4, 37: 5, 31: 6, 21: 7, 8: 8, 24: 9, 13: 10, 14: 11, 5: 12, 6: 13},
+        3: {22: 0, 34: 1, 36: 2, 30: 3, 27: 4, 37: 5, 31: 6, 21: 7, 8: 8, 24: 9, 13: 10, 14: 11, 5: 12, 6: 13},
+        7: {22: 0, 34: 1, 36: 2, 30: 3, 27: 4, 37: 5, 31: 6, 21: 7, 8: 8, 24: 9, 13: 10, 14: 11, 5: 12, 6: 13},
+        6: {1: 0, 3: 1, 4: 2, 6: 3, 9: 4, 10: 5, 11: 6}
+    }
 
-    elif (NinaPro_Database_Num == 2) or (NinaPro_Database_Num == 3) or (NinaPro_Database_Num == 7):
-        if lab == 22:
-            mapped_lab = 0
-        elif lab == 34:
-            mapped_lab = 1
-        elif lab == 36:
-            mapped_lab = 2
-        elif lab == 30:
-            mapped_lab = 3
-        elif lab == 27:
-            mapped_lab = 4
-        elif lab == 37:
-            mapped_lab = 5
-        elif lab == 31:
-            mapped_lab = 6
-        elif lab == 21:
-            mapped_lab = 7
-        elif lab == 8:
-            mapped_lab = 8
-        elif lab == 24:
-            mapped_lab = 9
-        elif lab == 13:
-            mapped_lab = 10
-        elif lab == 14:
-            mapped_lab = 11
-        elif lab == 5:
-            mapped_lab = 12
-        elif lab == 6:
-            mapped_lab = 13
-        # elif lab == 53:
-        #     mapped_lab = 14   -> # Rest
-        else:
-            print('#' * 100 + '\nMapping Failed! Class not found!\n' + '#' * 100)
-            mapped_lab = None
-
-    elif NinaPro_Database_Num == 6:
-        if lab == 1:
-            mapped_lab = 0
-        elif lab == 3:
-            mapped_lab = 1
-        elif lab == 4:
-            mapped_lab = 2
-        elif lab == 6:
-            mapped_lab = 3
-        elif lab == 9:
-            mapped_lab = 4
-        elif lab == 10:
-            mapped_lab = 5
-        elif lab == 11:
-            mapped_lab = 6
-        # elif lab == 0:
-        #     mapped_lab = 7    -> # Rest
-        else:
-            print('#' * 100 + '\nMapping Failed! Class not found!\n' + '#' * 100)
-            mapped_lab = None
-
-    else:
-        print('#' * 50 + '\nNinaPro Database NOT FOUND! No re-labeling performed\n' + '#' * 50)
-        mapped_lab = lab
-
-    return mapped_lab
-
+    try:
+        mapped_lab = label_maps[NinaPro_Database_Num].get(lab)
+        if mapped_lab is None:
+            print(f'Mapping Failed! Class {lab} not found for Database {NinaPro_Database_Num}.')
+        return mapped_lab
+    except KeyError:
+        
+        raise ValueError(f'NinaPro Database {NinaPro_Database_Num} NOT FOUND! No re-labeling performed.')
 
 # %%  Windowing signal
 def windowing_signal(arr_2d, wnd_length: int, overlap_perc, drop_last=True):
@@ -617,7 +545,7 @@ def windowing_Dataframe(df, wnd_length: int, overlap_perc, NinaPro_Database_Num=
 
 
 # %% Train, val & test split function for dataframe
-def train_val_test_split_df(dataframe, percentages=None, mode=None, manual_sel=None):
+def train_val_test_split_df(dataframe, percentages=None, mode=None, manual_sel=None, seed = None):
     '''
 
     :param dataframe:     Dataframe to be split by
@@ -628,11 +556,19 @@ def train_val_test_split_df(dataframe, percentages=None, mode=None, manual_sel=N
 
     :return:              train, validation and test dataframe with the same structure of the original one
     '''
-
+    if seed:
+        np.random.seed(seed)
     if percentages is None:
-        percentages = [0.5, 0.2, 0.3]
+        percentages = [0.6, 0.2, 0.2]
     elif sum(percentages) != 1:
         print('Percentages to divide dataframe are not equal to one! you are leaving out data!')
+
+    if percentages[2] == 0:  # Handle the case where test percentage is set to zero
+        print("Test percentage is set to zero! \n \
+        For code semplicity  and data integraty the validation dataframe will be saved in the third variable returned")
+        percentages[2] = percentages [1]
+        percentages[1] = 0
+
     if mode is None:  # random sample
         idx_list = np.unique(dataframe.index)
         n_samples = len(idx_list)
@@ -648,7 +584,7 @@ def train_val_test_split_df(dataframe, percentages=None, mode=None, manual_sel=N
 
     else:
         if mode not in dataframe.columns:
-            raise ValueError('"Criterion not present in dataframes columns!')
+            raise ValueError(f'Mode {mode} not present in dataframes columns!')
         if manual_sel is not None:
             if len(manual_sel) != 3:
                 raise ValueError('Provide a list with 3 ordered list for manual splitting\n'
@@ -658,7 +594,7 @@ def train_val_test_split_df(dataframe, percentages=None, mode=None, manual_sel=N
             test_df = dataframe[dataframe[mode].isin(manual_sel[2])]
 
         else:
-            mode_list = np.unique(dataframe[mode])
+            mode_list = dataframe[mode].unique()
             np.random.shuffle(mode_list)
             # train val and test sizes
             tr_size, val_size = round(len(mode_list) * percentages[0]), round(len(mode_list) * percentages[1])
@@ -1076,6 +1012,3 @@ def Train_Test_Split_Repetition(Unpacked_dataset_path, exe_list_to_keep=[], sub_
         if not os.path.exists(path_to_save + 'Numpy/' + set_):
             os.makedirs(path_to_save + 'Numpy/' + set_)
         np.save(path_to_save + 'Numpy/' + set_ + '/window_no_rest.npy', windows)
-
-
-
