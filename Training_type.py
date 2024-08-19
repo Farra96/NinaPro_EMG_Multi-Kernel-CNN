@@ -24,6 +24,7 @@ from MODELS import MKCNN_grid
 # %% Training types
 def train_model_standard(model, loss_fun, optimizer, dataloaders, scheduler, num_epochs=150, precision=1e-8,
                          patience=10, patience_increase=10, device=None, l2=None):
+
     if not device:
         if torch.cuda.is_available():
             device = torch.device('cuda')
@@ -128,8 +129,7 @@ def train_model_standard(model, loss_fun, optimizer, dataloaders, scheduler, num
                                   'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}
                     patience = patience_increase + epoch
                     # print(70 * '#', 5 * '\n',f'\nPATIENCE: -> {patience}',5 * '\n', 70 * '#')
-        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 70 * '#',
-              5 * '\n')
+        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 5 * '\n')
         if epoch > patience:
             break
 
@@ -246,8 +246,7 @@ def pre_train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, 
                     best_state = {'epoch': epoch + 1, 'state_dict': copy.deepcopy(model.state_dict()),
                                   'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}
                     patience = patience_increase + epoch
-        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 70 * '#',
-              5 * '\n')
+        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 5 * '\n')
         if epoch > patience:
             break
 
@@ -371,8 +370,7 @@ def train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, num_
                     best_state = {'epoch': epoch + 1, 'state_dict': copy.deepcopy(model.state_dict()),
                                   'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}
                     patience = patience_increase + epoch
-        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 70 * '#',
-              5 * '\n')
+        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 5 * '\n')
         if epoch > patience:
             break
 
@@ -385,9 +383,35 @@ def train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, num_
     return best_state, tr_epoch_loss_vec, val_epoch_loss_vec
 
 #%% Train model reversal
-def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, scheduler, lamba=0.5, alpha_start=0,
-                                  num_epochs=100, precision=1e-8, loss_fun_domain=nn.CrossEntropyLoss(),
-                                  patience=10, patience_increase=10, device=None):
+def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, scheduler, lamba = 0.5, alpha_start = 0, 
+                                  num_epochs = 100, precision = 1e-8, patience = 10, patience_increase = 10, 
+                                  loss_fun_domain=nn.CrossEntropyLoss(), combined_val_loss =  False, check_val_dom_loss = True, device=None):
+    '''
+    Parameters:
+        model (torch.nn.Module):                           The neural network model to be trained.
+        loss_fun (torch.nn.modules.loss):                  The loss function used for calculating the task-specific loss.
+        optimizer (torch.optim.Optimizer):                 The optimizer used for updating the model's weights.
+        dataloaders (dict):                                A dictionary containing torch.utils.data.DataLoader instances for both training ('train') and validation ('val') phases.
+        scheduler (torch.optim.lr_scheduler):              Scheduler to adjust the learning rate based on the training progress.
+        lamba (float, optional, default=0.5):              Weighting factor for the domain adaptation loss in the total loss calculation.
+        alpha_start (int, optional, default=0):            The starting epoch from which the domain adaptation effect begins.
+        num_epochs (int, optional, default=100):           Total number of epochs for training the model.
+        precision (float, optional, default=1e-8):         A threshold for numerical precision in comparing floating-point numbers.
+        patience (int, optional, default=10):              The number of epochs to wait for improvement in validation loss before early stopping.
+        patience_increase (int, optional, default=10):     The increase in patience when a new best validation loss is found.
+        loss_fun_domain (torch.nn.modules.loss, optional): The loss function used for the domain adaptation task.
+        combined_val_loss (bool, optional, default=False): Whether to combine task-specific and domain adaptation losses during validation.
+        check_val_dom_loss (bool, optional, default=True): Whether to compute and check the domain loss during the validation phase.
+        device (torch.device, optional):                   The device (CPU or GPU) on which to perform computations. If not specified, it defaults to GPU if available, otherwise CPU.
+    Returns:
+        best_state (dict):                     A dictionary containing the best model state, optimizer state, and scheduler state based on validation loss.
+        tr_epoch_loss (numpy.ndarray):         Array of training losses for each epoch.
+        val_epoch_loss (numpy.ndarray):        Array of validation losses for each epoch.
+        tr_epoch_loss_domain (numpy.ndarray):  Array of training domain losses for each epoch.
+        val_epoch_loss_domain (numpy.ndarray): Array of validation domain losses for each epoch.
+        tr_epoch_loss_task (numpy.ndarray):    Array of training task-specific losses for each epoch.
+        val_epoch_loss_task (numpy.ndarray):   Array of validation task-specific losses for each epoch.
+    '''
     if not device:
         if torch.cuda.is_available():
             device = torch.device('cuda')
@@ -410,11 +434,11 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                   'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}
 
     # Inserted to check value alpha
-    alpha_vec = []
+    # alpha_vec = []
 
-    #TODO: Change alphaVec, it goes from 0 to 0.9 suddenly
-    #ALPHA_VEC: -> [0.0, 0.0, 0.9311096086675779, 0.9311096086675779, 0.9974579674738373, 0.9974579674738373]
-
+    if combined_val_loss:
+        print(70*'#', 5*'\n','Considering domain loss over total loss on validation!', 5*'\n', 70*'#')
+        
     for epoch in range(num_epochs):
         epoch_start = time.time()
         print(70 * '#', 5 * '\n', 'Epoch {}/{}'.format(epoch, num_epochs - 1), 70 * '-', 5 * '\n')
@@ -431,16 +455,6 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
             y_true = []
             y_pred = []
 
-            p = float(epoch * tot_batch) / num_epochs / tot_batch
-
-            if epoch > alpha_start:
-                alpha = 2. / (1. + np.exp(-10 * p)) - 1
-            else:
-                alpha = 0
-            # Inserted to check values
-            alpha_vec.append(alpha)
-            print(70 * '#', 5 * '\n', f'ALPHA_VEC: -> {alpha_vec}', 5 * '\n', 70 * '#')
-
             for inputs, labels, sub in dataloaders[phase]:
                 cc = cc + 1
 
@@ -453,6 +467,15 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                 sub = sub.type(torch.LongTensor).to(device)
                 # print(f'LABEL: {labels[0]}      SUB:{sub[0]}')
                 if phase == 'train':
+                    p = float(epoch * tot_batch) / num_epochs / tot_batch
+
+                    if epoch > alpha_start:
+                        # alpha = 2. / (1. + np.exp(-10 * p)) - 1
+                        alpha = 1
+                    else:
+                        alpha = 0
+                    
+
                     model.train()
 
                     outputs, out_domain = model.forward(inputs, alpha)
@@ -490,8 +513,23 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                         y_pred = np.append(y_pred, labels_np)
 
                         loss_task = loss_fun(outputs, labels)
-                        loss_domain = loss_fun(out_domain, sub)
-                        loss = loss_task + (lamba * loss_domain)
+                        if check_val_dom_loss:
+                            loss_domain = loss_fun(out_domain, sub)
+                        
+                        if combined_val_loss:
+                            # This limit is set in order to avoid the model to find the point with lower valid loss
+                            # over the domain, infact, at the very beginning, with alpha zero, the invariant feature are not
+                            # learned, so the model will have a lower TOTAL validation loss
+                            # if alpha > 0.8:   # alpha > 0.8 -->  with 100 epochs and alpha_start = 0 it starts to count domain loss at epoch 22
+                            loss = loss_task - (lamba * loss_domain)  
+                            # We use the minus symbol because, when using the combination of them, while the task valid loss it is suppose to go down,
+                            # the domain val loss is suspposed to grow, as the model reverse the gradient. In this to avoid the model to stop a the 
+                            # very early epochs.
+
+                        else:
+                            loss = loss_task
+                        
+                        
 
                 loss_accumulator = loss_accumulator + ((1 / (total + 1)) * (loss.item() - loss_accumulator))
                 domain_loss_acc = domain_loss_acc + ((1 / (total + 1)) * (loss_domain.item() - domain_loss_acc))
@@ -501,8 +539,8 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                 acc = metrics.accuracy_score(y_true=y_true, y_pred=y_pred)
                 kappa = metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights='quadratic')
                 print(phase + " -> loss: {:0.5f}".format(loss_accumulator) + ", accuracy: {:0.5f}".format(acc) +
-                      ", kappa score: {:0.4f}".format(
-                          kappa) + f', Epoch: -> {epoch} / {num_epochs}  Batch Number: -> {cc} / {tot_batch}')
+                      ", kappa score: {:0.4f}".format(kappa) + ", dom_loss: {:0.4f}".format(domain_loss_acc) + 
+                      f', Epoch: -> {epoch} / {num_epochs}  Batch Number: -> {cc} / {tot_batch}')
 
             if phase == 'train':
                 tr_epoch_loss.append(loss_accumulator)
@@ -524,10 +562,14 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                     best_state = {'epoch': epoch + 1, 'state_dict': copy.deepcopy(model.state_dict()),
                                   'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}
                     patience = patience_increase + epoch
-        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 70 * '#',
-              5 * '\n')
+        print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - epoch_start), 5 * '\n')
         if epoch > patience:
             break
+            
+        print(70 * '#', 5 * '\n', f'ALPHA: -> {alpha}', 5 * '\n', 70 * '#')
+        # Inserted to check values
+        # alpha_vec.append(alpha)
+        # print(70 * '#', 5 * '\n', f'ALPHA_VEC: -> {alpha_vec}', 5 * '\n', 70 * '#')
 
     tr_epoch_loss, val_epoch_loss = np.array(tr_epoch_loss), np.array(val_epoch_loss)
     tr_epoch_loss_domain, val_epoch_loss_domain = np.array(tr_epoch_loss_domain), np.array(val_epoch_loss_domain)
@@ -866,16 +908,15 @@ def random_GS(grid, train_set, valid_set, test_set, path_to_save, cm_labels=None
         row = [ii + 1, min(val_loss),
                metrics.accuracy_score(y_true=y_true, y_pred=y_pred),
                metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights='quadratic'),
-               metrics.f1_score(y_true=y_true, y_pred=y_pred, average='micro'),
+               metrics.f1_score(y_true=y_true, y_pred=y_pred, average='weighted'),
                best_state['epoch'], avg_time, num_params, best_state['scheduler']]
 
         # Write CSV file with relevant infos about models
         with open(path_to_save + '/Params.csv', 'a', newline='') as myFile:
             writer = csv.writer(myFile)  # -> writer Object
             if ii == 0:  # Building columns (header net) only first cycle
-                header_net = ['N_model', 'Best Val Loss', 'Accuracy', 'Kappa', 'F1_score', 'Epoch',
-                              'Inference time [ms]',
-                              'Num Params', 'scheduler']
+                header_net = ['N_model', 'Best Val Loss', 'Accuracy', 'Kappa', 'F1_score', 'Best Epoch',
+                              'Inference time [ms]', 'Num Params', 'scheduler']
                 for key in total_params.keys():  # Key
                     for par in total_params[key].keys():  # Append columns of both net_params and learning_params
                         header_net.append(par)
