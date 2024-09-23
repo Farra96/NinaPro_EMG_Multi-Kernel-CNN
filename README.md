@@ -1,4 +1,4 @@
-# NinaPro_EMG_Multi-Kernel-CNN
+# NinaPro_EMG_Multi-Scale-CNN
 
 This GitHub repository accounts for studying sEMG classification algorithms tailored for prosthetic hand applications. It provides:
 
