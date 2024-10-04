@@ -127,88 +127,30 @@ class dataframe_dataset_triplet(data.Dataset):
     def __len__(self):
         return len(self.keys)
 
-#OLD
-# class dataframe_dataset_triplet(data.Dataset):
+#%% Corect last batch size == 1
+def adjust_dataloader(dataset, **params):
+    # Get the batch_size from params or default to 64 if not provided
+    batch_size = params.get('batch_size', 64)
 
-#     def __init__(self, dataframe, groupby_col, target_col, sample_frac=1.0):
-#         self.df = dataframe
-#         self.groupby_col = groupby_col
-#         self.target_col = target_col
-#         self.sample_frac = sample_frac
-#         self.channels = [i for i in dataframe.columns if 'ch' in i]
+    # Get the size of the last batch
+    total_samples = len(dataset)
+    last_batch_size = total_samples % batch_size
 
-#         self.groups = dataframe.groupby(groupby_col)
-#         self.indices = {i: group.sample(frac=sample_frac).index for i, group in self.groups}
-#         self.keys = list(self.indices.keys())
+    # Set drop_last to True if the last batch size is 1
+    if last_batch_size == 1:
+        params['drop_last'] = True
+    else:
+        params['drop_last'] = False
 
-#         # to delete df.query
-#         self.labels = np.unique(dataframe['label'])
-#         self.subjects = np.unique(dataframe[target_col])
+    # Create and return the DataLoader with updated params
+    return data.DataLoader(dataset, **params)
 
-#         self.sample_indices_by_label_sub = {}
-#         for label, sub in dataframe[['label', 'sub']].drop_duplicates().values:
-#             self.sample_indices_by_label_sub[(label, sub)] = np.unique(dataframe.query(f"label == {label} and {'sub'} == {sub}")[
-#                 'sample_index'].values)
-
-#         # Pre-compute tensors for each group and store them
-#         self.precomputed_samples = {}
-#         for key, indices in self.indices.items():
-#             self.precomputed_samples[key] = torch.tensor(self.df.loc[indices, self.channels].values).type(torch.FloatTensor)
-#         #  it should work even with: -> dataframe.query(f"label == {label} and {'sub'} == {sub}")[
-#         #         'sample_index'].values         ->> so you store less data !!!!!!!!! ADDED NP.UNIQUE()
-
-#     def __getitem__(self, idx):
-
-#         start_time = time.time()
-#         group_key = self.keys[idx]
-#         #group_indices = self.indices[group_key]    # Those are the indexes of datframe to be found, but slow
-#         end_time = time.time() - start_time
-#         print(f"\nTime taken for group_key and group_indices: {end_time}")
-
-#         start_time = time.time()
-#         sample = self.precomputed_samples[group_key]
-#         #sample = torch.tensor(self.df.iloc[group_indices][self.channels]).type(torch.FloatTensor)
-#         end_time = time.time() - start_time
-#         print(f"Time taken for sample tensor creation: {end_time}")
-
-#         start_time = time.time()
-#         label = torch.tensor(self.df.loc[group_indices, 'label'].values[0]) #.type(torch.int8)
-#         end_time = time.time() - start_time
-#         print(f"Time taken for label tensor creation: {end_time}")
-#         # sub = self.df.loc[group_indices, self.target_col].head(1).values[0]
-
-#         # # take a unique random value from groupby_col (in this case, sample index) after filtered dataframe
-#         # idx_sample = np.random.choice(self.df.query(f'{self.target_col} != {sub} and label == {label}')[self.groupby_col], size=1)[0]
-#         # # extract the casual positive sample
-#         # pos_sample = torch.tensor(self.df.loc[self.df[self.groupby_col] == idx_sample, self.channels].values)\
-#         #     .type(torch.float32)
-#         #
-#         # idx_sample = np.random.choice(self.df.query(f'label != {label}')[self.groupby_col], size=1)[0]
-#         # neg_sample = torch.tensor(self.df.loc[self.df[self.groupby_col] == idx_sample, self.channels].values)\
-#         #     .type(torch.float32)
-
-#         # After deleting query
-#         # positive
-#         # pos_sub = np.random.choice([k for k in self.subjects if k != sub])  # Changed bc in case of one single sub raises error (e.g. test_dataloader)
-#         start_time = time.time()
-#         pos_sub = np.random.choice(self.subjects)
-#         pos_index =np.random.choice(self.sample_indices_by_label_sub[(int(label), pos_sub)], size =1)[0]
-#         pos_sample = torch.tensor(self.groups.get_group(pos_index)[self.channels].values).type(torch.FloatTensor)
-#         end_time = time.time() - start_time
-#         print(f"Time taken for positive sample tensor creation: {end_time}")
-#         # negative
-#         start_time = time.time()
-#         neg_lbl = np.random.choice([k for k in self.labels if k != label])
-#         neg_index = np.random.choice(self.sample_indices_by_label_sub[(neg_lbl, np.random.choice(self.subjects))], size = 1)[0]
-#         neg_sample = torch.tensor(self.groups.get_group(neg_index)[self.channels].values).type(torch.FloatTensor)
-#         end_time = time.time() - start_time
-#         print(f"Time taken for negative sample tensor creation: {end_time}\n")
-
-#         return sample, label, pos_sample, neg_sample
-
-#     def __len__(self):
-#         return len(self.keys)
-
+# Not usefull
+##################################################################################################################################
+##################################################################################################################################
+##################################################################################################################################
+##################################################################################################################################
+##################################################################################################################################
 #%%
 class dataframe_dataset_JS(data.Dataset):
 
@@ -391,21 +333,3 @@ class CenterLoss(torch.nn.Module):
 
         # Update the centers using EMA
         self.centers = torch.nn.Parameter(self.alpha * sum_embeddings + (1 - self.alpha) * self.centers)
-
-
-# %% OLD PART
-
-def calculate_jensen_shannon_divergence(model1, model2):
-    # Get the weights of the second nn.Linear layer for both models
-    weights1 = model1.model[-2].weight.view(-1)
-    weights2 = model2.model[-2].weight.view(-1)
-
-    # Normalize the weights
-    weights1 = nn.Softmax(weights1)
-    weights2 = nn.Softmax(weights2)
-
-    # Calculate Jensen-Shannon Divergence
-    m = 0.5 * (weights1 + weights2)
-    jsd = 0.5 * (F.kl_div(weights1, m) + F.kl_div(weights2, m))
-
-    return jsd
