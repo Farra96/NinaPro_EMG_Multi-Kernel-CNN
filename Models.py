@@ -1,4 +1,3 @@
-
 import re
 import time
 import os
@@ -19,7 +18,7 @@ from scipy.stats import loguniform
 from sklearn import metrics
 
 from Data_Processing_Utils import PlotLoss, plot_confusion_matrix, train_val_test_split_df
-from DATALOADERS import Pandas_Dataset
+from DATALOADERS import Pandas_Dataset, adjust_dataloader
 
 
 # %% Personalized conv2D with circular padding along channels axis and zero padding along time axis
@@ -421,7 +420,7 @@ class MKCNN_grid(nn.Module):
             # nn.BatchNorm1d(512),
             # self.activation_fun,
             nn.Linear(2 * dict['N_SepConv'], 128),
-            # nn.BatchNorm1d(128),
+            nn.BatchNorm1d(128),
             self.activation_fun,
             nn.Linear(128, num_classes),
             # nn.Softmax(num_classes) # -> not inserted because I calculate the loss during the training & BEFORE the softmax
@@ -509,7 +508,7 @@ class MKCNN_grid_AN(nn.Module):
             # nn.BatchNorm1d(512),
             # self.activation_fun,
             nn.Linear(2 * dict['N_SepConv'], 128),
-            # nn.BatchNorm1d(128),
+            nn.BatchNorm1d(128),
             self.activation_fun,
             nn.Linear(128, num_classes),
             # nn.Softmax(num_classes) # -> not inserted because I calculate the loss during the training & BEFORE the softmax
@@ -521,6 +520,7 @@ class MKCNN_grid_AN(nn.Module):
             if self.output2 == nn.Flatten:
                 self.domain_classifier = nn.Sequential(
                     nn.Linear(2 * dict['N_SepConv'], 128),
+                    self.activation_fun,
                     nn.Linear(128, self.num_domains))
 
             elif self.output2 == MultiKernelConv2D_grid:
@@ -541,6 +541,8 @@ class MKCNN_grid_AN(nn.Module):
                     nn.Dropout2d(0.2),
                     nn.Flatten(),
                     nn.Linear(2* dict['N_SepConv'], 128),
+                    nn.BatchNorm1d(128),
+                    self.activation_fun,
                     nn.Linear(128, self.num_domains))
 
                 # self.domain_classifier = nn.Sequential( 
@@ -590,7 +592,14 @@ class MKCNN_grid_AN(nn.Module):
                     nn.init.constant_(layer.depthwise.bias, 0)
                 if layer.pointwise.bias is not None:
                     nn.init.constant_(layer.pointwise.bias, 0)
-
+                    
+    def reinitialize_last_linear_layers(self):
+        # Identify and re-initialize the last two linear layers
+        linear_layers = [layer for layer in self.model if isinstance(layer, nn.Linear)]
+        for layer in linear_layers[-2:]:
+            nn.init.xavier_normal_(layer.weight)
+            if layer.bias is not None:
+                nn.init.constant_(layer.bias, 0)
 
 
 
@@ -1269,7 +1278,7 @@ class TCN_ch_sp_ATT(nn.Module):
             # print(f'Input: -> {x.shape}')
             x = layer2.forward(x)
             # print(f'Module: -> {layer2} \n Output: -> {x.shape}')
-        # l2 = get_l2_regularization(self, lambda_l2=self.l2_lambda)
+            # l2 = get_l2_regularization(self, lambda_l2=self.l2_lambda)
             if alpha is not None:
                 if isinstance(layer2, self.output2):  # the domain classifier can start AFTER the flatten or AFTER the first linear layer
                     # dims = x.size()
@@ -1306,7 +1315,8 @@ def get_TL_results(model, tested_sub_df, path_to_save, train_rep, valid_rep, tes
     
     test = tested_sub_df[~tested_sub_df['rep'].isin(test_rep)]
     test_set = Pandas_Dataset(test.groupby('sample_index'))
-    test_dl = data.DataLoader(test_set, batch_size=64, shuffle= True, drop_last=False)
+    test_dl = adjust_dataloader(test_set, **dataloader_param)
+    
     
     train, valid = None, None
     if train_rep != []:      # If I'm training
@@ -1354,9 +1364,9 @@ def get_TL_results(model, tested_sub_df, path_to_save, train_rep, valid_rep, tes
         #     train_set = dataframe_dataset_JS(df_train, groupby_col='sample_index', target_col='sub')
         #     valid_set = dataframe_dataset_JS(df_val, groupby_col='sample_index', target_col='sub')
 
-
-        train_dl = data.DataLoader(train_set, **dataloader_param)
-        valid_dl = data.DataLoader(valid_set, **dataloader_param)
+        # Correct only in the case last batch is exaclty 1 (it stops for batch_norm)
+        train_dl = adjust_dataloader(train_set, **dataloader_param)
+        valid_dl = adjust_dataloader(valid_set, **dataloader_param)
 
         if train_type == 'Standard':
             best_weights, tr_losses, val_losses = train_model_standard(model=model, loss_fun=loss_fn,
@@ -1452,127 +1462,150 @@ def get_TL_results(model, tested_sub_df, path_to_save, train_rep, valid_rep, tes
 
 #%% Multi-head Attention
 
-class AveragePooling(nn.Module):
-    def __init__(self, num_towers):
-        super(AveragePooling, self).__init__()
-        self.num_towers = num_towers
+class PositionalEncoding2D(nn.Module):
+    def __init__(self, channels, height, width, group_size=64):
+        super(PositionalEncoding2D, self).__init__()
+        assert channels % group_size == 0, "Channels must be divisible by the group size"
+        
+        self.height = height
+        self.width = width
+        self.channels = channels
+        self.group_size = group_size
+        
+        # Create positional encodings
+        self.positional_encoding = self.create_positional_encoding(channels, height, width)
 
-    def forward(self, x):
-        batch_size, channels, height, width = x.size()
-
-        x = x.view(batch_size, self.num_towers, channels // self.num_towers, height, width)
-        x = torch.mean(x, dim=1)  # Shape: [batch, num_channels, height, width]
-        return x
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, emb_dim, width, height):
-        super(PositionalEncoding, self).__init__()
-        self.emb_dim = emb_dim
-
-        # Calculate the position encodings
-        position_enc = torch.zeros(emb_dim, width, height)
-        print(position_enc.shape)
-        position = torch.arange(0, emb_dim, dtype=torch.float).unsqueeze(1)
-        print(position.shape)
-        div_term = torch.exp(torch.arange(0, emb_dim, 2).float() * (-math.log(10000.0) / emb_dim))
-        print(div_term.shape)
-        position_enc[0::2, :, :] = torch.sin(position * div_term)
-        position_enc[1::2, :, :] = torch.cos(position * div_term)
-
-        self.register_buffer('position_enc', position_enc)
-
-    def forward(self, x):
-        # Expand the position encodings to match the input shape
-        position_enc = self.position_enc[:x.size(2), :x.size(3), :].unsqueeze(0).unsqueeze(0)
-
-        # Add the position encodings to the input tensor
-        x = x + position_enc
-
-        return x
-
-
-class MultiHeadedSelfAttention(nn.Module):
-    def __init__(self, emb_dim, num_heads):
-        super(MultiHeadedSelfAttention, self).__init__()
-        self.num_heads = num_heads
-        self.head_dim = emb_dim // num_heads
-
-        self.query = nn.Linear(emb_dim, emb_dim)
-        self.key = nn.Linear(emb_dim, emb_dim)
-        self.value = nn.Linear(emb_dim, emb_dim)
-        self.combine_heads = nn.Linear(emb_dim, emb_dim)
-
-    def forward(self, x):
-        batch_size, channels, height, width = x.size()
-
-        # Reshape input tensor for multi-head attention
-        x = x.view(batch_size, self.num_heads, self.head_dim, height * width)
-        x = x.permute(0, 1, 3, 2)  # Shape: [batch_size, num_heads, height * width, head_dim]
-
-        # Apply self-attention mechanism
-        query = self.query(x)
-        key = self.key(x)
-        value = self.value(x)
-
-        attention_scores = torch.matmul(query, key.transpose(2,
-                                                             3))  # Shape: [batch_size, num_heads, height * width, height * width]
-        attention_probs = F.softmax(attention_scores, dim=-1)
-
-        weighted_value = torch.matmul(attention_probs,
-                                      value)  # Shape: [batch_size, num_heads, height * width, head_dim]
-        weighted_value = weighted_value.permute(0, 1, 3, 2)  # Shape: [batch_size, num_heads, head_dim, height * width]
-        weighted_value = weighted_value.view(batch_size, channels, height,
-                                             width)  # Shape: [batch_size, channels, height, width]
-
-        # Combine the outputs from different attention heads
-        x = self.combine_heads(weighted_value)
-        return x
-
-
-class MKCNN_ATT(nn.Module):
-    def __init__(self, out_ch: np.array, in_ch=1, multi_kernel_sizes=None, kernel_dim=np.array([1, 3, 3]),
-                 number_of_classes=14):
-        super(MKCNN_ATT, self).__init__()
+    def create_positional_encoding(self, channels, height, width):
         """
-        :param in_ch:               for signals should be 1
-        :param out_ch:              need to be 4 int values array for channels of four conv
-        :param multi_kernel_sizes:  need to be an 2D array or tensor with shape (int,2) for all four stages of 2d convolution
-        :param kernel_dim:          normal kernel dimension for 3 conv stages
-        :param number_of_classes:   Number of classes to classify (output of last FC)
+        Create a 2D positional encoding with unique channel encodings and positional values.
         """
-        if multi_kernel_sizes is not None:
-            self.multi_kernel_sizes = multi_kernel_sizes
-        else:
-            multi_kernel_sizes = np.full((5, 2), [1, 3]).astype(int)
-            for i in range(5):
-                multi_kernel_sizes[i][0] = 10 * (i + 1)
-            self.multi_kernel_sizes = multi_kernel_sizes
+        assert channels % 2 == 0  # Ensure channels are even for proper sine/cosine split
 
-        self.conv_kernel_dim = kernel_dim
-        if out_ch.size != 4:
-            raise Exception("There are 4 convolutions, out_ch must have one dim with size 4")
-        if multi_kernel_sizes.shape[1] != 2:
-            raise Exception("Error, second dimension of kernel_dim needs to be 2 for Conv2D")
-        # if kernel_dim.shape[1] != 2:
-        #     raise Exception("Error, second dimension of kernel_dim needs to be 2 for Conv2D")
-        if kernel_dim.shape[0] != 3:
-            raise Exception("Number of conv layer with variable filter size is 3, first dimensions must have length 3")
+        pe = torch.zeros(channels, height, width)  # Positional encoding tensor
 
-        self.model = nn.Sequential(
-            MultiKernelConv2D(in_ch, out_ch[0], multi_kernel_sizes),
-            # AveragePooling(len(self.multi_kernel_sizes)),
-            # PositionalEncoding(2 * out_ch[0]),
-            MultiHeadedSelfAttention(out_ch[0], num_heads=4))
+        # 1. **Channel-wise Encoding**: Apply a unique value for each feature map to encode the channel
+        for group_start in range(0, channels, self.group_size):
+            for i in range(group_start, group_start + self.group_size):
+                pe[i, :, :] += i  # Add a unique value for each channel
 
-    def forward(self, inputs):
-        for module in self.model:
-            print("Inputs: ", inputs.shape, "\nmodule: ", module, )
-            inputs = module.forward(inputs)
-            print('Output: ', inputs.shape, '\n\n')
+        # 2. **2D Positional Encoding**: Apply sine and cosine positional encodings on the grid
+        d_model = self.group_size // 2  # For sine and cosine encoding within each group
 
-        return inputs
+        div_term = torch.exp(torch.arange(0, d_model, 2) * -(torch.log(torch.tensor(10000.0)) / d_model))
+        
+        pos_y = torch.arange(0, height).unsqueeze(1).repeat(1, width).float()
+        pos_x = torch.arange(0, width).unsqueeze(0).repeat(height, 1).float()
 
+        for i in range(0, d_model, 2):
+            pe[i, :, :] += torch.sin(pos_y * div_term[i // 2])
+            pe[i + 1, :, :] += torch.cos(pos_y * div_term[i // 2])
+
+        for i in range(d_model, self.group_size, 2):
+            pe[i, :, :] += torch.sin(pos_x * div_term[i // 2 - d_model // 2])
+            pe[i + 1, :, :] += torch.cos(pos_x * div_term[i // 2 - d_model // 2])
+
+        # 3. **Repeat Encoding Across Groups**: Ensure equal encoding for each group of 64 channels
+        for group_start in range(self.group_size, channels, self.group_size):
+            pe[group_start:group_start + self.group_size, :, :] = pe[0:self.group_size, :, :]
+
+        return pe.unsqueeze(0)  # Add batch dimension
+
+    def forward(self, x):
+        # Add positional encoding to the input features
+        return x + self.positional_encoding.to(x.device)
+
+
+class MKCNN_grid_ATTN(nn.Module):
+    def __init__(self, dict, num_domains, num_classes=14, num_heads=2):
+        super(MKCNN_grid_ATTN, self).__init__()
+
+        self.activation_fun = dict['act_func']
+        self.in_ch = dict['N_multik'] * 2 * len(dict['Kernel_multi_dim'])  # Based on concatenation of MultiKernelConv2D
+
+        # Multi-Kernel Conv2D grid layer (parallel convolutional feature extraction)
+        self.parallel_convs = MultiKernelConv2D_grid(dict)
+
+        # Positional encoding shared across all parallel convs
+        H, W = 10, 7  # Assuming height and width are passed in dict
+        self.positional_encoding = PositionalEncoding2D(channels=dict['N_multik'] * 2, height=H, width=W, group_size=dict['N_multik'] * 2)
+
+        # Multi-Head Self-Attention layer
+        self.multihead_attention = nn.MultiheadAttention(len(dict['Kernel_multi_dim']) * dict['N_multik'] * 2 * H * W, num_heads=num_heads)
+                                                            # 5 * 32 * 2 * 10 * 7 -> 128, 10, 7
+        # Final linear projection to reduce dimensions after attention
+        # self.proj_linear = nn.Linear(len(dict['Kernel_multi_dim']) * dict['N_multik'] * 2, 4 * dict['N_multik'])
+                                        
+
+        self.conv_post_attentiont = nn.Sequential(
+            SeparableConv2d(dict['N_Conv_conc'], dict['N_SepConv'], 1, kernel_size=3),  # Separable Conv 1
+            nn.BatchNorm2d(dict['N_SepConv']),  # BatchNorm 1
+            self.activation_fun,  # Activation
+            nn.MaxPool2d(2),  # Pool layer (window size adjusted as per reduced dimensions)
+            nn.Dropout2d(0.2),  # Dropout
+
+            SeparableConv2d(dict['N_SepConv'], dict['N_SepConv'], 1, kernel_size=3),  # Separable Conv 2
+            nn.BatchNorm2d(dict['N_SepConv']),  # BatchNorm 2
+            self.activation_fun,  # Activation
+            nn.MaxPool2d(2),  # Pooling after separable conv
+            nn.Dropout2d(0.2),  # Dropout
+
+            nn.Flatten(),  # Flatten before fully connected layers
+        )
+
+
+       # Fully connected layers for final classification
+        self.fc_layers = nn.Sequential(
+            nn.Linear(2 * dict['N_SepConv'], 128),  # Linear with reduced size
+            nn.BatchNorm1d(128),
+            self.activation_fun,  # Activation function
+            nn.Linear(128, num_classes)  # Final classification layer
+        )
+
+        # Domain classifier for adversarial training
+        self.domain_classifier = nn.Sequential(
+            nn.Linear(2 * dict['N_SepConv'], 128),  # First layer
+            nn.BatchNorm1d(128),  # Batch norm
+            self.activation_fun,  # Activation
+            nn.Linear(128, num_domains)  # Output layer for domain classification
+        )
+        
+    def forward(self, x, alpha=None):
+        # Pass input through the parallel convolutions (MultiKernelConv2D_grid)
+        features = self.parallel_convs(x)  # Shape: [batch, 320, H, W]
+
+        # Apply positional encoding to each feature map
+        features = torch.split(features, 64, dim=1)  # Split feature maps into 5 groups of 64
+        encoded_features = [self.positional_encoding(fmap) for fmap in features]
+        for i, enc_fmap in enumerate(encoded_features):
+            print(f"Feature map {i} shape after positional encoding: {enc_fmap.shape}")
+
+        # Concatenate the encoded features
+        concat_features = torch.cat(encoded_features, dim=1)  # Shape: [batch, 320, H, W]
+        print(f"Shape before attention: {concat_features.shape}")
+
+        # Flatten spatial dimensions and apply attention
+        batch_size, channels, H, W = concat_features.shape
+        flattened_features = concat_features.view(batch_size, channels, H * W)
+        attention_output, _ = self.multihead_attention(flattened_features, flattened_features, flattened_features)
+
+        # Reshape back to original structure
+        reshaped_output = attention_output.view(batch_size, 64 * 5, H, W)
+
+        # Pass through post-attention convolutional layers
+        post_attention_output = self.conv_post_attentiont(reshaped_output)
+        
+        class_output = self.fc_layers(post_attention_output)
+
+        if alpha is not None:
+            # Apply Gradient Reversal Layer
+            reversed_features = GradientReversalLayer.apply(post_attention_output, alpha)
+
+            # Domain classification output
+            domain_output = self.domain_classifier(reversed_features)
+            return class_output, domain_output
+
+        # If no adversarial training is happening, only return the classification output
+        return class_output
 
 #%% COPIED FOR ATTENTION
 class BasicConv(nn.Module):
@@ -1666,358 +1699,3 @@ class CBAM(nn.Module):
         if not self.no_spatial:
             x_out = self.SpatialGate(x_out)
         return x_out
-
-
-
-# %% Multihead attention pytorch (linearize images flattening them)
-# def scaled_dot_product(q, k, v, mask=None):
-#     d_k = q.size()[-1]
-#     attn_logits = torch.matmul(q, k.transpose(-2, -1))
-#     attn_logits = attn_logits / np.sqrt(d_k)
-#     if mask is not None:
-#         attn_logits = attn_logits.masked_fill(mask == 0, -9e15)
-#     attention = nn.functional.softmax(attn_logits, dim=-1)
-#     values = torch.matmul(attention, v)
-#     return values, attention
-
-
-# class MultiheadAttention(nn.Module):
-#
-#     def __init__(self, input_dim, embed_dim, num_heads):
-#         super().__init__()
-#         assert embed_dim % num_heads == 0, "Embedding dimension must be 0 modulo number of heads."
-#
-#         self.embed_dim = embed_dim
-#         self.num_heads = num_heads
-#         self.head_dim = embed_dim // num_heads
-#
-#         # Stack all weight matrices 1...h together for efficiency
-#         # Note that in many implementations you see "bias=False" which is optional
-#         self.qkv_proj = nn.Linear(input_dim, 3 * embed_dim)
-#         self.o_proj = nn.Linear(embed_dim, embed_dim)
-#
-#         self._reset_parameters()
-#
-#     def _reset_parameters(self):
-#         # Original Transformer initialization, see PyTorch documentation
-#         nn.init.xavier_uniform_(self.qkv_proj.weight)
-#         self.qkv_proj.bias.data.fill_(0)
-#         nn.init.xavier_uniform_(self.o_proj.weight)
-#         self.o_proj.bias.data.fill_(0)
-#
-#     def forward(self, x, mask=None, return_attention=False):
-#         batch_size, seq_length, _ = x.size()
-#         qkv = self.qkv_proj(x)
-#
-#         # Separate Q, K, V from linear output
-#         qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3 * self.head_dim)
-#         qkv = qkv.permute(0, 2, 1, 3)  # [Batch, Head, SeqLen, Dims]
-#         q, k, v = qkv.chunk(3, dim=-1)
-#
-#         # Determine value outputs
-#         values, attention = scaled_dot_product(q, k, v, mask=mask)
-#         values = values.permute(0, 2, 1, 3)  # [Batch, SeqLen, Head, Dims]
-#         values = values.reshape(batch_size, seq_length, self.embed_dim)
-#         o = self.o_proj(values)
-#         # o = o.permute(1, 2, 0).reshape(batch_size,self.head_dim, height, width)
-#
-#         if return_attention:
-#             return o, attention
-#         else:
-#             return o
-
-# %% TEST EXAMPLES
-#############################################################################################
-#############################################################################################
-#############################################################################################
-#############################################################################################
-#############################################################################################
-#############################################################################################
-#############################################################################################
-
-if __name__ == '__main__':
-
-    # %% SeparableConv2d
-    in_ch = 1
-    out_ch = 64
-    depth = 1
-    kernel_size = 3
-    Input = torch.rand(1, 400, 12)
-    MODEL = SeparableConv2d(in_ch, out_ch, depth, kernel_size)
-
-    A = MODEL.forward(Input)
-    print(A.shape)
-
-    # %%  MULTIKERNEL Params
-    in_ch = 1
-    out_cha = 32
-    kernels = np.full((5, 2), [1, 3])
-    for i in range(5):
-        kernels[i][0] = 10 * (i + 1)  # -> if Multikernel_20x10 -> kernels[i][0] = 1 * (i + 1)
-    kernels2 = np.full((5, 2), [1, 3])  #
-    for i in range(5):
-        kernels2[i][0] = (i + 1)
-
-    # %% Multikernel test
-    MULTIK = MultiKernelConv2D(in_ch, out_cha)
-    MULTIK_20x10 = MultiKernelConv2D_20x10(in_ch, out_cha)  # Creates kernels inside function
-
-    INPUT = torch.randn([64, 1, 400, 12])  # -> INPUT2 = torch.randn([64, 1, 200, 14])
-    INPUT2 = torch.randn([64, 1, 20, 10])
-    OUTPUT_MULTIK = MULTIK.forward(INPUT)
-    OUTPUT_MULTIK2 = MULTIK_20x10(INPUT2)
-
-    A = MULTIK.forward(INPUT)
-    B = MULTIK_20x10.forward(INPUT2)
-    print(A.shape, B.shape)
-
-    # %% Checking model output throughout MKCNN
-    in_ch = 1
-    out_ch = np.array([32, 128, 128, 128])
-    kernels = np.full((5, 2), [1, 3])  #
-    for i in range(5):
-        kernels[i][0] = 10 * (i + 1)
-
-    kernels2 = np.full((5, 2), [1, 3])  #
-    for i in range(5):
-        kernels2[i][0] = (i + 1)
-        # -> default values
-    kernel_dim = np.array([1, 3, 3])  # -> default values
-    number_of_classes = 14  # -> default values
-
-    # %%
-    TEST = MKCNN(out_ch=out_ch, multi_kernel_sizes=kernels, kernel_dim=kernel_dim, number_of_classes=number_of_classes)
-    TEST2 = MKCNN_20x10(out_ch)  # Other values use default ones
-
-    INPUT = torch.randn([16, 1, 400, 12])
-    INPUT2 = torch.randn([64, 1, 20, 10])
-
-    OUTPUT_MKCNN, _ = TEST.forward(INPUT)
-    OUTPUT_MKCNN_20x10 = TEST2.forward(INPUT2)  # error
-
-    print(OUTPUT_MKCNN.shape, OUTPUT_MKCNN_20x10.shape)
-
-    # %% MKCNN GRID 20x10
-    device = torch.device('cuda')
-    kernel_sizes = np.full((3, 5, 2), [1, 3])
-    for j in range(3):
-        for i in range(5):
-            kernel_sizes[j][i][0] = (i + 1) + j
-        n_classes = 14
-
-    grid = {'net': {'N_multik': [16, 32, 64, 128], 'N_Conv_conc': [64, 128, 256], 'N_SepConv': [64, 128, 256],
-                    'Kernel_multi_dim': [kernel_sizes[0], kernel_sizes[1], kernel_sizes[2]],
-                    'Kernel_Conv_conc': [1, 3, 5],
-                    'act_func': [nn.ReLU(), nn.LeakyReLU(), nn.Hardsigmoid(), nn.ELU()],
-                    'Pool_Type': [nn.MaxPool2d, nn.AvgPool2d],
-                    },
-            'learning': {'n_models': [100],
-                         'num_epochs': [100],
-                         'lr': loguniform.rvs(1e-4, 1e-2, size=10),
-                         'batch_size': [64, 128, 256, 512],
-                         # 'folds': [5],    # In case of cross_validation, but here I use a manual validation set
-                         'opt': ['Adam'],
-                         'loss_fn': [nn.CrossEntropyLoss(reduction='mean').to(device)],
-                         'device': [device]
-                         }
-            }
-
-    # GRID EXPLANATION
-    """
-NET
-    N_multik:           Number of neurons in the first convolution hidden layer (of 2) of the different parallel 
-                        self.towers with different kernels
-    N_Conv_conc:        Number of Neurons in the convolution of the concatenated "features" passed through self.towers.  
-    N_SepConv:          Number of neurons in the Separable Convolution stages that FOLLOWS the feature extraction from 
-                        self.towers
-    Kernel_multi_dim:   N kernel dimensions (tuple) for the different convolutions in the N parallel self.towers.
-    Kernel_Conv_conc:   Kernel dimension of the convolution stage for the concatenated "features" output of self.towers
-    Pool_Type:          Type of pooling to be performed with. If not MaxPool2d check dimensionality coherence 
-    wnd_len:            Value added for forcing dimensionality coherence with different channel/wnd_len dimensions.
-                        IMPORTANT: it has to be EXCLUDED if working with DB1, that has a different configuration 
-                        (wnd_len = 20 because of lower frequency)
-    
-LEARNING
-    n_models: Number of models to be tested
-    """
-    # %% grid param extract
-    from Training_type import random_choice
-    n_grid = grid['net']  # selecting network hyperparameter
-    l_grid = grid['learning']  # selecting simulation hyperparameter
-    n_params = random_choice(n_grid)
-    l_params = random_choice(l_grid)
-    # %% Multikernel_grid 20x10
-    MULTIK_GRID = MultiKernelConv2D_grid(n_params)
-
-    # INPUT = torch.randn([128, 1, 20, 10])
-    INPUT = torch.randn([128, 1, 300, 12])
-    OUTPUT_MULTIK_GRID = MULTIK_GRID.forward(INPUT)
-    print(OUTPUT_MULTIK_GRID.shape)
-
-    # %% MKCNN GRID 20x10
-    TEST_GRID = MKCNN_grid(n_params)
-
-    # INPUT = torch.randn([16, 1, 20, 10])
-    INPUT = torch.randn([128, 1, 400, 12])
-    OUTPUT_MKCNN_GRID = TEST_GRID.forward(INPUT)
-    print(OUTPUT_MKCNN_GRID.shape)
-
-    num_params = sum(p.numel() for p in TEST_GRID.parameters() if p.requires_grad)
-    print(f"Number of trainable parameters: {num_params}")
-
-    # %% MKCNN wnd_lenXch
-    wnd_len = 300
-    device = torch.device('cuda')
-    kernels_gap = [g for g in range(0, 3 * round(wnd_len / 20), round(wnd_len / 20))]
-    kernel_sizes = np.full((3, 5, 2), [1, 3])
-    for j in range(3):
-        for i in range(5):
-            kernel_sizes[j][i][0] = (round(wnd_len / 20) * (i + 1) + kernels_gap[j])
-        n_classes = 14
-
-    grid = {'net': {'N_multik': [16, 32, 64, 128], 'N_Conv_conc': [64, 128, 256], 'N_SepConv': [64, 128, 256],
-                    'Kernel_multi_dim': [kernel_sizes[0], kernel_sizes[1], kernel_sizes[2]],
-                    'Kernel_Conv_conc': [1, 3, 5],
-                    'act_func': [nn.ReLU(), nn.LeakyReLU(), nn.Hardsigmoid(), nn.ELU()],
-                    'Pool_Type': [nn.MaxPool2d, nn.AvgPool2d], 'wnd_len': [wnd_len]
-                    # -> u need square brackets for random_choice to work
-                    },
-            'learning': {'n_models': [100],
-                         'num_epochs': [100],
-                         'lr': loguniform.rvs(1e-4, 1e-2, size=10),
-                         'batch_size': [64, 128, 256, 512],
-                         # 'folds': [5],    # In case of cross_validation, but here I use a manual validation set
-                         'opt': ['Adam'],
-                         'loss_fn': [nn.CrossEntropyLoss(reduction='mean').to(device)],
-                         'device': [device]
-                         }
-            }
-
-    n_grid = grid['net']  # selecting network hyperparameter
-    l_grid = grid['learning']  # selecting simulation hyperparameter
-    # %% picks random param
-    n_params = random_choice(n_grid)
-    l_params = random_choice(l_grid)
-    # %% Multikernel wnd_lenxCh
-    MULTIK_GRID = MultiKernelConv2D_grid(n_params)
-
-    INPUT = torch.randn([32, 1, wnd_len, 12])
-    OUTPUT_MULTIK_GRID = MULTIK_GRID.forward(INPUT)
-    print(OUTPUT_MULTIK_GRID.shape)
-
-    # %% MKCNN GRID wnd_lenxCh
-    TEST_GRID = MKCNN_grid(n_params)
-
-    INPUT = torch.randn([128, 1, wnd_len, 12])
-    OUTPUT_MKCNN_GRID, _ = TEST_GRID.forward(INPUT)
-    print(OUTPUT_MKCNN_GRID.shape)
-
-    num_params = sum(p.numel() for p in TEST_GRID.parameters() if p.requires_grad)
-    print(f"Number of trainable parameters: {num_params}")
-
-    # %% Evaluate a model
-    database = '/home/ricardo/DB2+DB7+DB3'
-    os.chdir(database)
-    n_model_to_test = 2  # Remember that, there is a difference between excel file (start from model 1) and random_GS (start saving from 0)
-    state_dict_path = f'/home/ricardo/DB2+DB7+DB3/grid_search/minus_one_to_one/State_Dict/state_dict_model_{n_model_to_test}.pth'
-    TEST_GRID.load_state_dict(torch.load(state_dict_path))
-
-    # Dataloader
-    import pandas as pd
-    from Data_Processing_Utils import Norm_each_sub_by_own_param
-    from DATALOADERS import Pandas_Dataset, train_val_test_split_df
-
-    df = pd.read_csv('Dataframe/dataframe_wnd.csv',
-                     dtype={'sub': np.int8, 'label': np.int8, 'rep': np.int8, 'sample_index': np.uint32})
-    NORM_TYPE, NORM_MODE = 'minus_one_to_one', 'channel'
-    df = Norm_each_sub_by_own_param(df, norm_type=NORM_TYPE, mode=NORM_MODE)
-    df.set_index('sample_index')
-    df_grouped = df.groupby('sample_index')  # You must pass to the dataloader a groupby dataframe
-    dataset = Pandas_Dataset(df_grouped)
-    dataloader = data.DataLoader(dataset, batch_size=16368, shuffle=True)
-
-    TEST_GRID.eval()
-    TEST_GRID.to(device)
-    softmax_block = nn.Softmax(dim=1)
-    y_pred, y_true = [], []
-
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs = inputs[:, None, :, :]
-            inputs = inputs.to(device)
-            labels_np = labels.cpu().data.numpy()
-            # forward
-            outputs = TEST_GRID(inputs)
-            outputs_np = softmax_block(outputs)
-            outputs_np = outputs_np.cpu().data.numpy()
-            outputs_np = np.argmax(outputs_np, axis=1)
-
-            y_pred = np.append(y_pred, outputs_np)
-            y_true = np.append(y_true, labels_np)
-
-        acc = metrics.accuracy_score(y_true=y_true, y_pred=y_pred)
-        kappa = metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights='quadratic')
-        F1_score = metrics.f1_score(y_true=y_true, y_pred=y_pred, average='macro')
-
-        print(f'ACCURACY : {acc}\nKAPPA : {kappa}\nF1_score : {F1_score}')
-
-        # %%
-        # %% MKCNN_CBAM_GRID wnd_lenXch
-        wnd_len = 300
-        device = torch.device('cuda')
-        kernels_gap = [g for g in range(0, 3 * round(wnd_len / 20), round(wnd_len / 20))]
-        kernel_sizes = np.full((3, 5, 2), [1, 3])
-        for j in range(3):
-            for i in range(5):
-                kernel_sizes[j][i][0] = (10 * (i + 1) + kernels_gap[j])
-            n_classes = 14
-
-        grid = {'net': {'N_multik': [16, 32, 64, 128],  # 'N_Conv_conc': [64, 128, 256], 'N_SepConv': [64, 128, 256],
-                        'Kernel_multi_dim': [kernel_sizes[0], kernel_sizes[1], kernel_sizes[2]],
-                        'N_Head_Att': [4, 8, 16], 'N_ch_Att': [32, 64, 128],
-                        'act_func': [nn.ReLU(), nn.LeakyReLU(), nn.Hardsigmoid(), nn.ELU()],
-                        'Pool_Type': [nn.MaxPool2d, nn.AvgPool2d], 'wnd_len': [wnd_len]
-                        # -> u need square brackets for random_choice to work
-                        },
-                'learning': {'n_models': [100],
-                             'num_epochs': [100],
-                             'lr': loguniform.rvs(1e-4, 1e-2, size=10),
-                             'batch_size': [64, 128, 256, 512],
-                             # 'folds': [5],    # In case of cross_validation, but here I use a manual validation set
-                             'opt': ['Adam'],
-                             'loss_fn': [nn.CrossEntropyLoss(reduction='mean').to(device)],
-                             'device': [device]
-                             }
-                }
-
-        n_grid = grid['net']  # selecting network hyperparameter
-        l_grid = grid['learning']  # selecting simulation hyperparameter
-        # %% picks random param
-        n_params = random_choice(n_grid)
-        l_params = random_choice(l_grid)
-
-        # %% MKCNN GRID wnd_lenxCh
-        # TEST_GRID_ATT = MKCNN_CBAM_grid(n_params)
-
-        INPUT = torch.randn([25, 1, wnd_len, 12])
-        # OUTPUT_MKCNN_GRID_ATT = TEST_GRID_ATT.forward(INPUT)
-        print(OUTPUT_MKCNN_GRID.shape)
-
-        num_params = sum(p.numel() for p in TEST_GRID.parameters() if p.requires_grad)
-        print(f"Number of trainable parameters: {num_params}")
-
-    # %% MultiHeadAttention & CBAM
-
-    batch_size = 16
-    num_ch = 320
-    H = 10
-    W = 7
-
-    input_shape = (batch_size, num_ch, H, W,)
-    gate_channels = 320
-    reduction_ratio = 4
-    pool_types = ['avg', 'max']
-
-    cbam = CBAM(gate_channels, reduction_ratio, pool_types)
-    input_tensor = torch.randn(input_shape)
-    output_tensor = cbam(input_tensor)
