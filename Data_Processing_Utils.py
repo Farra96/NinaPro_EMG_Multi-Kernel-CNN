@@ -306,10 +306,11 @@ def Get_Sub_Norm_params(arr_2D, norm_type, mode=None):
 
 
 # %% Normalize 2D array
-def NormalizeData(arr_2D, norm_type=None):
+def NormalizeData(arr_2D, norm_type=None, mu = 2.048):  # mu -> https://ieeexplore.ieee.org/document/9422807
     """
     :param arr_2D:      Array (time x channel) or Dataframe Object to normalize
     :param norm_type:   Type of Normalization
+    :param mu:          μ parameter for μ-law normalization (default=255, here 2,048)
     :return:            Normalized 2D_signal
     """
     dataframe = False
@@ -334,6 +335,8 @@ def NormalizeData(arr_2D, norm_type=None):
         arr_2D = 2 * ((arr_2D - np.min(arr_2D)) / denominator) - 1
     elif norm_type == 'z_score':
         arr_2D = scipy.stats.zscore(arr_2D, nan_policy='omit')
+    elif norm_type == 'mu_law':
+        arr_2D = np.sign(arr_2D) * np.log1p(mu * np.abs(arr_2D)) / np.log1p(mu)
     else:
         print('Normalization type not found!')
 
@@ -345,7 +348,7 @@ def NormalizeData(arr_2D, norm_type=None):
 
 
 # %% Normalize dataframe column ch
-def Norm_each_sub_by_own_param(df, mode='sub', norm_type: str = None,
+def Norm_each_sub_by_own_param(df, mode='sub', norm_type = None,
                                rectify=False):  # , path_to_pick_sub_norm_param = None):
     '''
 
@@ -359,7 +362,7 @@ def Norm_each_sub_by_own_param(df, mode='sub', norm_type: str = None,
     # -> this is for inference in the train_model_standard
     # norm_params = pd.read_csv(path_to_pick_sub_norm_param + norm_type + '.csv')
 
-    data = df
+    data = df.copy()
     n_sub = np.unique(df['sub'])
     sub_grouped = df.groupby('sub')
     chs = [col for col in df.columns if 'ch' in col]
@@ -393,7 +396,51 @@ def Norm_each_sub_by_own_param(df, mode='sub', norm_type: str = None,
 
     return data
 
+def Norm_each_sub_label_by_own_param(df, mode='sub', norm_type=None, rectify=False):
+    '''
+    Normalizes each channel based on each subject and each label.
+    
+    :param df:          Data to normalize, must contain columns named 'sub' and 'label'
+    :param mode:        Choose between 'sub' or 'channel' to determine if normalizing each channel separately
+    :param norm_type:   Choose between 'minus_one_to_one', 'zero_to_one', or 'z_score'
+    :param rectify:     Boolean, if True, takes the absolute value of the signal before normalizing
+    :return:            The dataframe with the normalized data
+    '''
 
+    data = df.copy()
+    n_sub = np.unique(df['sub'])
+    chs = [col for col in df.columns if 'ch' in col]
+
+    if rectify:
+        print('RECTIFICATION OF THE DATAFRAME')
+        data[chs] = data[chs].abs()
+        print('DONE')
+
+    # Group by both subject and label
+    sub_label_grouped = df.groupby(['sub', 'label'])
+
+    if mode == 'sub':
+        for (sub, label), group in sub_label_grouped:
+            print(f'Norm SUB: {sub}, LABEL: {label}')
+            arr_to_norm = group.filter(like='ch', axis=1)
+            normed_arr = NormalizeData(arr_to_norm, norm_type=norm_type)
+            data.loc[group.index, chs] = normed_arr
+            
+    elif mode == 'channel':
+        for (sub, label), group in sub_label_grouped:
+            print(f'\nNorm SUB: {sub}, LABEL: {label}')
+            arr_to_norm = group.filter(like='ch', axis=1)
+            normed_arr = arr_to_norm.copy()
+            for j in arr_to_norm.columns:
+                print(f'Norm CH: {j}')
+                normed_arr[j] = NormalizeData(normed_arr[j], norm_type=norm_type)
+                data.loc[group.index, j] = normed_arr
+                
+    else:
+        print('Normalization mode not found!')
+
+    print('DONE')
+    return data
 # %% Database 1,3,6,7
 
 def mapping_labels(lab, NinaPro_Database_Num: int):
@@ -942,73 +989,3 @@ def iir_notch_filt(signal_1D, F_samp, f0, quality, plot_filt=False, plot_sign=Fa
         plt.show(dpi=10000)
 
     return signal_filt
-
-
-# %% Split in train val and test based on repertitions (to check)
-def Train_Test_Split_Repetition(Unpacked_dataset_path, exe_list_to_keep=[], sub_to_discard=[], path_to_save=None):
-    """
-
-        :param Unpacked_dataset_path: Data are in the form SubXeYrepZ.npy where it is stored the EMG signals of each channel
-        :param exe_list_to_keep:      List of exercise to keep for Hand Gesture Classificaton
-        :param sub_to_discard:        Choose if there are subjects to not consider (e.g. left handed, amputee)
-        :param path_to_save:          Path to save dataframe files, if none is passed, will be  "DBX/Numpy"
-                                        of Unpacked_dataset_path
-        :return:                      Saved Numpy array already windowed
-        """
-
-    os.chdir(Unpacked_dataset_path)
-    EMG_data = sorted(os.listdir())
-
-    if path_to_save is None:
-        path_to_save = os.path.join(os.path.dirname(Unpacked_dataset_path)) + '/Numpy/'
-    if not os.path.exists(path_to_save):
-        os.makedirs(path_to_save)
-
-    # Creating Train-Val-Test manually
-    Sets = {'train_set': list(), 'val_set': list(), 'test_set': list()}
-    counter = 0
-    # -> sub 14 & 16 removed
-    for name in EMG_data:
-        if 'Sub' in name and int(re.findall(r'\d+', name)[0]) not in sub_to_discard:
-            exe_num = int(re.findall(r'\d+', name)[1])
-            if exe_num in exe_list_to_keep:
-                rep = int(re.findall(r'\d+', name)[2])
-                counter = counter + 1
-
-                if (rep == 1) or (rep == 3) or (rep == 5) or (rep == 7) or (rep == 9):
-                    Sets['train_set'].append(name)  # -> 1375
-                elif (rep == 2) or (rep == 10):
-                    Sets['val_set'].append(name)  # -> 550
-                # elif (rep == 4) or (rep == 6) or (rep == 8):
-                else:
-                    Sets['test_set'].append(name)  # -> 825
-    print('Tot_number_of_data', counter)  # -> 2750
-
-    # Concatenating Windows & Create Numpy array
-    for set_ in Sets:
-        n_data = len(Sets[set_])
-        print(n_data)  # -> [1375, 550,825] = [train, val, test]
-        counter = 1
-        windows, label = [], []
-        for name in Sets[set_]:
-            exe_num = int(re.findall(r'\d+', name)[1])
-
-            print('DATA: ', counter, ' / ', n_data)
-            sample = np.load(name)
-            counter = counter + 1
-
-            windows_sample = windowing_signal(sample, 20, 0.75, drop_last=False).astype(np.float32)
-            label_vec = np.full(shape=windows_sample.shape[0], fill_value=mapping_labels(exe_num, 1))
-
-            windows.append(windows_sample)
-            label.append(label_vec)
-
-        windows = np.vstack(windows)
-        label = np.concatenate(label, axis=0)
-        print('#' * 100)
-        print(windows.shape)
-        print(label.shape)
-        print('#' * 100)
-        if not os.path.exists(path_to_save + 'Numpy/' + set_):
-            os.makedirs(path_to_save + 'Numpy/' + set_)
-        np.save(path_to_save + 'Numpy/' + set_ + '/window_no_rest.npy', windows)
