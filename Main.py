@@ -1,4 +1,4 @@
-#%% 
+import os
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import random
 import argparse
-import os
+
 import time
 import csv
 import copy
@@ -16,32 +16,34 @@ from sklearn import metrics
 from torch.utils import data
 
 # Custom Libraries
+if os.getcwd() != os.path.abspath('/home/riccardo/MKCNN'):
+    os.chdir('/home/riccardo/MKCNN')
 sys.path.append('/home/ricardo/MKCNN')
 
-from Data_Processing_Utils import Norm_each_sub_by_own_param, train_val_test_split_df, PlotLoss, plot_confusion_matrix
+from Data_Processing_Utils import Norm_each_sub_by_own_param, Norm_each_sub_label_by_own_param, \
+    train_val_test_split_df, PlotLoss, plot_confusion_matrix
 
 from DATALOADERS import dataframe_dataset_triplet, Pandas_Dataset, dataframe_dataset_JS
 
 from Training_type import  train_model_standard, train_model_reversal_gradient, train_model_JS, \
     train_model_triplet, pre_train_model_triplet
 
-from MODELS_2 import MKCNN, MKCNN_grid, MKCNN_grid_AN, \
+from MODELS_2 import MKCNN, MKCNN_grid, MKCNN_grid_AN, MKCNN_grid_ATTN, \
     MultiKernelConv2D_grid, TCN_ch_sp_ATT, get_TL_results
 
 # TODO: 
-# AdaBatch normalitation:
-# - Each batch in the training must have data from same partecipant, so that BN statistics are different for each subject
-# - DUring inference, load BN statistic of subject X
-# - During TL, calculate new subject BN statistics 
-# Normalization technique +lowpass  -> https://ieeexplore.ieee.org/abstract/document/10285513 
+# AdaBatch normalitation:       -> Probably not necessary because the way data are normalize before to be fed to the network
+# - Calculayte mean and variance from each subject in the training
+# - During inference, load BN statistic of subjects in the batch
+# - During TL, calculate new subject BN statistics before re-train
+# Normalization technique +lowpass  -> https://ieeexplore.ieee.org/abstract/document/10285513 -> introduced to be tested (doesn't seems to work at all)
 # Build a subject-specific model to check performance 
 
 # INFOS DB3:
 # -left hand: [2, 5, 6]
-# - SUB 4: -> is over the double from second maximum (worse) DASH SCORE, consider take him down
-# - 66 Missing files after formatting (66 missing 'SubXeYrepZ')
-# - SUB: 1 has done fewer exercise: 9 / 14 (may have wrong labels?)
-# - SUB7: channel 9 and 10 has same min and max, not used -> 0% forearm
+# - SUB 4: -> is over the double from second maximum (worse) DASH SCORE, consider take him out
+# - 66 Missing files after formatting (66 missing 'SubXeYrepZ')  -> SUB: 1 has done fewer exercise: 9 / 14 
+# - SUB7: channel 9 and 10 has same min and max, not used -> 0% forearm -> fill with 0 as they are saved as -1
 
 # %% Delete FutureWarning
 import warnings
@@ -67,12 +69,14 @@ parser.add_argument('-groups', '--GROUPS', help='Divide or not the subjects in 5
 parser.add_argument('-amputee', '--AMPUTEE', help='Exploit Reversal between healty and amputee subs', action='store_true')
 parser.add_argument('-dom_val_loss', '--DOM_VAL_LOSS', help='Exploit the DOMAIN loss on validation for model to be selected', action='store_true')
 
+parser.add_argument('-dev', '--DEVICE', help='Device to use (cuda or cpu)', type=int, default=0)
+
 args = parser.parse_args()
 
 # N_SUB = int(args.N_SUB)
 DATABASE = str(args.DATABASE)
 WND_LEN = int(args.WND_LEN)
-RECT = args.RECT.lower() == 'true'      #    Became false if you pass -rec 'False'
+RECT = args.RECT.lower() == 'true'      #  Became false if you pass -rec 'False'
 NORM_MODE = str(args.NORM_MODE)
 NORM_TYPE = str(args.NORM_TYPE)
 SPLIT = str(args.SPLIT)
@@ -85,9 +89,11 @@ GAMMA = float(args.GAMMA)
 GROUPS = True if args.GROUPS else False
 AMPUTEE = True if args.AMPUTEE else False
 DOM_VAL_LOSS = True if args.DOM_VAL_LOSS else False
+
+device = torch.device(f'cuda:{args.DEVICE}' if args.DEVICE >= 0 else 'cpu')
 #%% Manual selection
 # DATABASE = 'DB2+DB7+DB3'
-# WND_LEN = 200
+# WND_LEN = 300
 # NORM_MODE = 'channel'
 # NORM_TYPE = 'z_score'
 # RECT = True
@@ -97,10 +103,11 @@ DOM_VAL_LOSS = True if args.DOM_VAL_LOSS else False
 # EPOCHS = 5
 # ACT_FUN = 'lrelu'
 # FREEZE = 'last'
-# GAMMA = 0.7
+# GAMMA = 0.9
 # GROUPS = False
 # AMPUTEE = False
 # DOM_VAL_LOSS = False
+# device = torch.device('cuda:0')
 
 print('\n\nSETTINGS:                    \n'
       f'DATABASE        :  --> {DATABASE}  \n'
@@ -116,15 +123,16 @@ print('\n\nSETTINGS:                    \n'
       f'GAMMA           :  --> {GAMMA}     \n'
       f'GROUPS          :  --> {GROUPS}    \n'
       f'AMPUTEE         :  --> {AMPUTEE}   \n'
-      f'DOM VAL LOSS    :  --> {DOM_VAL_LOSS}')
+      f'DOM VAL LOSS    :  --> {DOM_VAL_LOSS}\n'
+      f'DEVICE          :  --> {device}')   
 
 # %% Database path
 database = f'/home/riccardo/EMG_data/{DATABASE}/'
 exe_labels = ['Medium wrap', 'Lateral', 'Extensions type', 'Tripod', 'Power sphere', 'Power disk', 'Prismatic pitch',
               'Index Extension', 'Thumb Adduction', 'Prismatic 4 fingers', 'Wave in', 'Wave out', 'Fist', 'Open hand']
 
-torch.cuda.set_device(1)
-device = torch.device('cuda:0')
+# torch.cuda.set_device(1)
+# device = torch.device('cuda:0')
 # device = torch.device("cpu")
 
 filename = f'wnd_{WND_LEN}_{NORM_TYPE}_{NORM_MODE}_rect_{RECT}'
@@ -138,7 +146,8 @@ n_channels = [cx for cx in df.columns if 'ch' in cx]
 df.loc[:, n_channels] = df.loc[:, n_channels].astype(np.float32)
 
 # %% Normalization
-df = Norm_each_sub_by_own_param(df, norm_type=NORM_TYPE, mode=NORM_MODE, rectify=RECT)
+# df = Norm_each_sub_by_own_param(df, norm_type=NORM_TYPE, mode=NORM_MODE, rectify=RECT)
+df = Norm_each_sub_label_by_own_param(df, mode='sub', norm_type=NORM_TYPE, rectify=RECT)
 
 # INFOS & CORRECTIONS:
 # 1) -> SUBJECT 69 CHANNEL 9 AND 10 ARE ALL ZEROS (sub 69 is the sub number 7 of  DB3, amputee and no space for them (0% of forearm).
@@ -176,15 +185,16 @@ df = df.loc[~(df['sub'].isin(sub_to_test))]
 
 # %% Fixing and ordering "sub" column numbers [from 0 to X] for domain classifier.
 if TRAIN_TYPE == 'Reversal' or 'TCN_SAM_CAM':
-
-    # Create 5 groups for lowering Domain classifier burden
+    
+    filename = filename + f"_lamba_{GAMMA}"
+    # Create 5 groups for lowering Domain classifier burden & exploit domain loss during validation
     if GROUPS is True:
         # shuffle subjects before to fit them in a group
         n_subject2 = np.unique(df['sub'])
         df['group'] = np.zeros(len(df)).astype(np.uint8)    # Create new column
         group_size = len(n_subject2) // 5
         remainder = len(n_subject2) % 5
-        # Attention! Because both "groups" column and train_val_test_split_df works same way, seeds here MUST be different from 32
+        # Attention! Because both "groups" column and train_val_test_split_df works similar way, seeds here MUST be different from 32
         np.random.seed(24)  
         np.random.shuffle(n_subject2)
         # fill 'group' column with same value for each 10 subjects to create 5 domain 
@@ -193,9 +203,9 @@ if TRAIN_TYPE == 'Reversal' or 'TCN_SAM_CAM':
             df.loc[mask, 'group'] = i
         # Allocate each subject not part of a group in different groups
         if remainder != 0:
-            print(f'Division in groups not integral! redistributing {remainder} subjects')
+            print(f'Division in groups not integer! redistributing {remainder} subjects')
             for i in range(remainder):
-                df.loc[df['sub'] == n_subject2[- i+1], 'group'] == i
+                df.loc[df['sub'] == n_subject2[- (i+1)], 'group'] = i
             
         print(f' Number of samples per Group:\n{df["group"].value_counts()}')
         # df['sub'] = df['group']       
@@ -223,6 +233,9 @@ if TRAIN_TYPE == 'Reversal' or 'TCN_SAM_CAM':
     df = df.reset_index(drop=True)
     df = df.set_index(pd.RangeIndex(start=0, stop=len(df)))
     df = df.drop(columns=['Unnamed: 0'], errors='ignore')
+    
+    if DOM_VAL_LOSS:
+        filename = filename + '_dom_val_loss'
 
 
 #%% Split dataframe
@@ -238,11 +251,12 @@ if SPLIT == 'rep':
     
     check_dom_loss = True
     
-    # Swap 'sub' column with amputee column to perform Adversrail Network Healty vs Amputee
+    # Swap 'sub' column with amputee column to perform Adversarial Network Healty vs Amputee
     if AMPUTEE:
         df_train['sub'], df_val['sub'], df_test['sub'] = df_train['amputee'], df_val['amputee'], df_test['amputee']
         del df_train['amputee'], df_val['amputee'], df_test['amputee']
-        
+    
+    # Swap 'sub' column with different casually selcted groups to perform adversarial with less domain (5 vs 60, easier loss for domain classifier)  
     elif GROUPS:
         print(f'Number of samples per Group after splitting: \nTRAIN: \n {df_train["group"].value_counts()}\n\n\
                 VALID:\n {df_val["group"].value_counts()} ')
@@ -269,9 +283,47 @@ elif SPLIT == 'sub':  # subject 5->175[cm]x75[kg] good tester in average
         check_dom_loss = True
         del df_train['amputee'], df_val['amputee']
         
+    elif GROUPS:           
+            # Get unique subjects in the first group to determine size for validation
+            first_group_subjects = df[df['group'] == 0]['sub'].unique()  # Assuming group 0 is the first group
+            
+            val_subjects = []
+            for group in df['group'].unique():
+                # Get unique subjects from the current group
+                group_subjects = df[df['group'] == group]['sub'].unique()
+                
+                # Randomly select two subjects from the current group
+                selected_subjects = np.random.choice(group_subjects, size= round(len(first_group_subjects) / 5), replace=False)
+                
+                # Append the selected subjects to the validation subjects list
+                val_subjects.extend(selected_subjects)
+
+            # Create the validation DataFrame (df_val) by filtering df for the selected subjects
+            df_val = df[df['sub'].isin(val_subjects)]
+
+            # Create the train DataFrame (df_train) by excluding the selected validation subjects
+            df_train = df[~df['sub'].isin(val_subjects)]
+
+            # Manually assign the test set from a separate DataFrame (e.g., sub_to_test_df)
+            df_test = sub_to_test_df
+
+            # After the manual splitting, we can print the counts per group for the train and validation sets
+            valid_group = df_val['sub'].unique()
+            test_group = df_test['sub'].unique()
+
+            print(f'Number of samples per Group after splitting: \n \
+                TRAIN: \n {df_train["group"].value_counts()}\n\n \
+                VALID:\n {df_val["group"].value_counts()} ')
+            
+            df_train.loc[:, 'sub'], df_val.loc[:, 'sub'] = df_train['group'], df_val['group']
+            del df_train['group'], df_val['group']
+            check_dom_loss = True
+        
     else:
-        # Swapping test and validation for how the function works 
-        df_train, df_test, df_val = train_val_test_split_df(df, mode=SPLIT, percentages = [0.8, 0.0, 0.20], seed = 32)
+        # Swapping test and validation order for how the function works 
+        df_train, df_test, df_val = train_val_test_split_df(df, mode=SPLIT, percentages = [0.8, 0.0, 0.20], seed = 34)
+        # In cross-subject experiment, in order to maximize variability and subs employed for training/validation,
+        # I directly test the model over the subjects originally left out for TL, as they are unseen subjects as well.
         df_test = sub_to_test_df
         
         valid_group = df_val['sub'].unique()
@@ -280,20 +332,11 @@ elif SPLIT == 'sub':  # subject 5->175[cm]x75[kg] good tester in average
         # so domain classifier doesn't tilt in evaluation mode
         check_dom_loss = False
         # Swap columns for reversal
-        if GROUPS:
-            print(f'Number of samples per Group after splitting: \n \
-                  TRAIN: \n {df_train["group"].value_counts()}\n\n \
-                  VALID:\n {df_val["group"].value_counts()} ')
-            
-            df_train.loc[:, 'sub'], df_val.loc[:, 'sub'] = df_train['group'], df_val['group']
-            del df_train['group'], df_val['group']
-            check_dom_loss = True
-        
         
         counts = df_train['sub'].value_counts(sort=False)
         # Create the ordered vector using the counts of unique values
         ordered_sub = np.concatenate([np.full(count, i) for i, count in enumerate(counts)])
-        # Rewriting df_train['sub'] to be from 0 to n_sub (in order to classify the domain with cross-entropy loss)
+        # Rewriting df_train['sub'] to be from 0 to n_sub (in order to classify the domain with cross-entropy loss) (no need for validation as it doesn't use reversal)
         df_train.loc[:, 'sub'] = ordered_sub.astype(np.uint8)
 
 # Reset index
@@ -301,7 +344,7 @@ df_train = df_train.reset_index(drop=True)
 df_train = df_train.set_index(pd.RangeIndex(start=0, stop=len(df_train)))
 df_train = df_train.drop(columns=['Unnamed: 0'], errors='ignore')
     
-# del df
+del df
 
 # %% DATASETS
 # You must pass to the dataloader a groupby dataframe
@@ -391,13 +434,16 @@ if TRAIN_TYPE == 'Standard' or TRAIN_TYPE == 'Triplet' or  TRAIN_TYPE == 'Pre_Tr
 
 elif TRAIN_TYPE == 'Reversal':
     model = MKCNN_grid_AN(net, num_domains=len(np.unique(df_train['sub'])))
-
+    # model = MKCNN_grid_ATTN(net, num_domains=len(np.unique(df_train['sub'])))
+    
 elif TRAIN_TYPE == 'TCN_SAM_CAM':
     # l2_factor = 0.2
     model = TCN_ch_sp_ATT(wnd_len=WND_LEN, n_classes=n_classes,num_domains= len(np.unique(df_train['sub'])), dom_out=net['Output2'])
 
 model = model.to(device)
 
+total_params= sum([p.numel() for p in model.parameters() if p.requires_grad])
+print(f'Model created with Num params: {total_params}')
 # %% Loss Optim and scheduler
 # Define Loss functions
 cross_entropy_loss = nn.CrossEntropyLoss(reduction='mean').to(device)
@@ -412,8 +458,6 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=
 precision = 1e-6
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, factor=.2,  patience=5, verbose=True, eps=precision)
 
-total_params= sum([p.numel() for p in model.parameters() if p.requires_grad])
-print(f'Model created with Num params: {total_params}')
 
 # %% Training and validation
 num_epochs = EPOCHS
@@ -449,8 +493,6 @@ elif TRAIN_TYPE == 'Reversal' or  TRAIN_TYPE == 'TCN_SAM_CAM':
                                       combined_val_loss =  DOM_VAL_LOSS, check_val_dom_loss = check_dom_loss)
                                       # More patient increase because at the beginning it starts to overfit
 
-    filename = filename + f"_lamba_{GAMMA}"
-
 elif TRAIN_TYPE == 'JS':
     best_weights, \
         tr_losses, val_losses, \
@@ -464,8 +506,6 @@ elif TRAIN_TYPE == 'JS':
     
 
 # %% Savings
-if DOM_VAL_LOSS:
-    filename = filename + '_dom_val_loss'
 path = database + f'/{TRAIN_TYPE}/Cross_{SPLIT}'
 if not os.path.exists(path):
     os.makedirs(path)
@@ -643,23 +683,27 @@ params = {'batch_size': batch_size,
         'drop_last': False}
 
 
-# Param for TL training
-optimizer_tl = torch.optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), weight_decay=1e-3)
-cross_entropy_loss = nn.CrossEntropyLoss(reduction='mean').to(device)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer_tl, factor=.2,
-                                                    patience=5, verbose=True, eps=1e-6)
+# Parameters for optimizer and scheduler
+lr = 0.01
+betas = (0.9, 0.999)
+weight_decay = 1e-3
+scheduler_factor = 0.2
+scheduler_patience = 5
+
+scheduler_eps = 1e-6
+
 #%% Cycle over sub_to_test and over reps
 # -> Here it is possible to change the training type for fitting new user.
 # For example, you can apply Adversarial Network with reversal gradient to learn Repetition-invariant-feature for the new subject.
-model_copy = copy.deepcopy(model)
 cc = 1
 n_rep = [2, 4, 1, 5, 6]
 # rep 3 is used to test
 test_rep = [3]
 
+initial_state = copy.deepcopy(model.state_dict())
 # if TRAIN_TYPE == 'Standard' or  TRAIN_TYPE == 'Reversal':
-for subx in sub_to_test:
-    print(70 * '#', 5 * '\n', f'Testing sub Number: -> {cc} / {len(sub_to_test)}', 5 * '\n', 70 * '#')
+for subx in sub_to_test[2:]:
+    print(70 * '#', 5 * '\n', f'Testing sub Number: {subx} -> {cc} / {len(sub_to_test)}', 5 * '\n', 70 * '#')
     df = sub_to_test_df[sub_to_test_df['sub'] == subx]
     cc = cc + 1
     for n_rep_tr in range(len(n_rep)):      # Varying number of repetition used to train
@@ -670,19 +714,36 @@ for subx in sub_to_test:
 
             idx = n_rep.index(val_rep[0])
             tr_reps = [n_rep_copy[(idx + i) % len(n_rep_copy)] for i in range(n_rep_tr)]
-            print(70 * '#', 3 * '\n', "Num train rep:", n_rep_tr, "     Train Reps:", tr_reps, f'   Val Rep: {val_rep}', 3 * '\n', 70 * '#')
+            print(70 * '#', 3 * '\n',\
+                f'Testing sub Number: {cc}/{len(sub_to_test)}',"    Num train rep:", n_rep_tr, "     Train Reps:", tr_reps, f'   Val Rep: {val_rep}', \
+                    3 * '\n', 70 * '#')
             #combinations = itertools.combinations(n_rep_copy, n_rep_tr)
             # for tr_reps in combinations:
             #     print("Cycle", n_rep_tr, ":", list(tr_reps), "Val rep:", val_rep)
+            
+            # Reload the model's initial state
+            model.load_state_dict(initial_state)
+            
+            # # Re-inituialize lienar layer, responsible for classification only
+            # model.reinitialize_last_layers()
+            
+            # Reinitialize the optimizer with the same parameters
+            optimizer_tl = torch.optim.Adam(model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
 
-            get_TL_results(model=model_copy,
+            # Reinitialize the scheduler with the new optimizer
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer_tl, factor=scheduler_factor,
+                                                                    patience=scheduler_patience, eps=scheduler_eps)
+            # Reinitialize the loss function
+            cross_entropy_loss = nn.CrossEntropyLoss(reduction='mean').to(device)
+            
+            get_TL_results(model=model,
                         tested_sub_df=df, train_type='Standard',
                         train_rep=tr_reps, valid_rep = val_rep, test_rep = test_rep,
                         exe_labels=exe_labels,
-                        num_epochs=10,
+                        num_epochs=15,
                         loss_fn=cross_entropy_loss, optimizer=optimizer_tl, **params, scheduler=scheduler, device=device,
 
-                        filename=None, path_to_save=f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/{filename}/')
+                        filename=None, path_to_save=f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/{filename}_2/')
 
 ####################################################################################
 ####################################################################################
@@ -760,8 +821,8 @@ evals_avg_healty = evals_avg[~evals_avg['Tested_sub'].isin([66,69,71])]
 std_avg_healty = std_avg[~std_avg['Tested_sub'].isin([66,69,71])]
 
 # Group by index modulo 5 and calculate the mean of the "F1_score" column
-grouped_avg = evals_avg.groupby(evals_avg.index % 5)["F1_score"].agg(['mean', 'std'])
-grouped_avg_healty = evals_avg_healty.groupby(evals_avg_healty.index % 5)["F1_score"].agg(['mean', 'std'])
+grouped_avg = evals_avg.groupby(evals_avg.index % 5)["Accuracy"].agg(['mean', 'std'])
+grouped_avg_healty = evals_avg_healty.groupby(evals_avg_healty.index % 5)["Accuracy"].agg(['mean', 'std'])
 
 # grouped_std = std_avg.groupby(std_avg.index % 5)["F1_score"]   
 # grouped_std_healty = std_avg_healty.groupby(std_avg_healty.index % 5)["F1_score"]
@@ -783,11 +844,11 @@ grouped_avg_healty = evals_avg_healty.groupby(evals_avg_healty.index % 5)["F1_sc
 #     combined_std_healty.append(consum_healty)
 
 # Plot the mean F1_score values against the repetitions used
-plt.plot(range(5), grouped_avg['mean'], marker='o', markersize=4, label='Mean F1 score', color = 'red', linewidth = 1.3)
+plt.plot(range(5), grouped_avg['mean'], marker='o', markersize=4, label='Mean Accuracy', color = 'red', linewidth = 1.3)
 plt.errorbar(range(5), grouped_avg['mean'], yerr=grouped_avg['std'], fmt='none', capsize=5, color='red', linewidth = 1.3)
  # Those 3 amputee are possible to plot opnly in the combined database
 if DATABASE == 'DB2+DB7+DB3':
-    plt.plot(range(5), grouped_avg_healty['mean'], marker='o', markersize=4, label='Mean F1 score', color = 'blue', linewidth = 1.3)
+    plt.plot(range(5), grouped_avg_healty['mean'], marker='o', markersize=4, label='Mean Accuracy', color = 'blue', linewidth = 1.3)
     plt.errorbar(range(5), grouped_avg_healty['mean'], yerr=grouped_avg_healty['std'], fmt='none', capsize=5, color='blue', linewidth = 1.3)
     plt.legend(labels=['All Subjects', 'Healthy Subjects'], loc='upper left')
 
@@ -805,95 +866,95 @@ for i in range(1, 5):  # Exclude the first value (index 0) in the x-axis
 
 plt.xlabel('Number of Repetitions used for training')
 # plt.title('Mean F1_score over 15 (3A) subjects')
-plt.ylabel('F1 score ± Std')
+plt.ylabel('Accuracy ± Std')
 plt.xticks(range(5))
 plt.grid(True)
 # plt.show()
 plt.savefig(f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/{filename}/plot.png')
 plt.close()
 
+
 # %% Confront AMPUTEEES
-import matplotlib.pyplot as plt
-database = f'/home/riccardo/EMG_data/{DATABASE}/'
-filename = f'wnd_{WND_LEN}_{NORM_TYPE}_{NORM_MODE}_rect_{RECT}'
+# import matplotlib.pyplot as plt
+# database = f'/home/riccardo/EMG_data/{DATABASE}/'
+# filename = f'wnd_{WND_LEN}_{NORM_TYPE}_{NORM_MODE}_rect_{RECT}'
 
 # filename = filename + '_Amputee'
 # filename = filename + f'_lamba_{GAMMA}'
 
-filename = filename[8:]
-evals_200 = pd.read_csv(f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_200_{filename}/Evals.csv')
-evals_300 = pd.read_csv(f'{database}{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_300_{filename}/Evals.csv')
-evals_200 = evals_200.sort_values(by='Name')
-evals_300 = evals_200.sort_values(by='Name')
-evals_avg_200 = pd.read_csv(f"{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_200_{filename}/evals_avg.csv")
-evals_avg_300 = pd.read_csv(f"{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_300_{filename}/evals_avg.csv")
+# filename = filename[8:]
+# evals_200 = pd.read_csv(f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_200_{filename}/Evals.csv')
+# evals_300 = pd.read_csv(f'{database}{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_300_{filename}/Evals.csv')
+# evals_200 = evals_200.sort_values(by='Name')
+# evals_300 = evals_200.sort_values(by='Name')
+# evals_avg_200 = pd.read_csv(f"{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_200_{filename}/evals_avg.csv")
+# evals_avg_300 = pd.read_csv(f"{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/wnd_300_{filename}/evals_avg.csv")
 
-if DATABASE == 'DB2+DB7+DB3':
-    # Filter the data to include only subjects 66, 69, and 71 --> = subs 4,7 and 9 of DB3
-    evals_avg_66_200 = evals_avg_200[evals_avg_200['Tested_sub'] == 66]
-    evals_avg_69_200 = evals_avg_200[evals_avg_200['Tested_sub'] == 69]
-    evals_avg_71_200 = evals_avg_200[evals_avg_200['Tested_sub'] == 71]
+# if DATABASE == 'DB2+DB7+DB3':
+#     # Filter the data to include only subjects 66, 69, and 71 --> = subs 4,7 and 9 of DB3
+#     evals_avg_66_200 = evals_avg_200[evals_avg_200['Tested_sub'] == 66]
+#     evals_avg_69_200 = evals_avg_200[evals_avg_200['Tested_sub'] == 69]
+#     evals_avg_71_200 = evals_avg_200[evals_avg_200['Tested_sub'] == 71]
     
-    evals_avg_66_300 = evals_avg_300[evals_avg_300['Tested_sub'] == 66]
-    evals_avg_69_300 = evals_avg_300[evals_avg_300['Tested_sub'] == 69]
-    evals_avg_71_300 = evals_avg_300[evals_avg_300['Tested_sub'] == 71]
+#     evals_avg_66_300 = evals_avg_300[evals_avg_300['Tested_sub'] == 66]
+#     evals_avg_69_300 = evals_avg_300[evals_avg_300['Tested_sub'] == 69]
+#     evals_avg_71_300 = evals_avg_300[evals_avg_300['Tested_sub'] == 71]
     
-    # Filter the data to include only subjects 66, 69, and 71
-    evals_amputee_200 = evals_200[evals_200['Tested_sub'].isin([66, 69, 71])]
-    std_values_dict_200 = {}
-    evals_amputee_300 = evals_300[evals_300['Tested_sub'].isin([66, 69, 71])]
-    std_values_dict_300 = {}
+#     # Filter the data to include only subjects 66, 69, and 71
+#     evals_amputee_200 = evals_200[evals_200['Tested_sub'].isin([66, 69, 71])]
+#     std_values_dict_200 = {}
+#     evals_amputee_300 = evals_300[evals_300['Tested_sub'].isin([66, 69, 71])]
+#     std_values_dict_300 = {}
 
-    for subs in [66, 69, 71]:
-        eval_sub_200 = evals_200[evals_200['Tested_sub'] == subs] 
-        eval_sub_300 = evals_300[evals_300['Tested_sub'] == subs] 
-        # std_values = eval_sub.groupby(eval_sub.index % 5)["F1_score"].std()
-        std_values_200 = [eval_sub_200['F1_score'].iloc[i:i+5].std() for i in range(0, len(eval_sub_200), 5)][:5]
-        std_values_300 = [eval_sub_300['F1_score'].iloc[i:i+5].std() for i in range(0, len(eval_sub_300), 5)][:5]
-        std_values_dict_200[subs] = std_values_200
-        std_values_dict_300[subs] = std_values_300
+#     for subs in [66, 69, 71]:
+#         eval_sub_200 = evals_200[evals_200['Tested_sub'] == subs] 
+#         eval_sub_300 = evals_300[evals_300['Tested_sub'] == subs] 
+#         # std_values = eval_sub.groupby(eval_sub.index % 5)["F1_score"].std()
+#         std_values_200 = [eval_sub_200['Accuracy'].iloc[i:i+5].std() for i in range(0, len(eval_sub_200), 5)][:5]
+#         std_values_300 = [eval_sub_300['Accuracy'].iloc[i:i+5].std() for i in range(0, len(eval_sub_300), 5)][:5]
+#         std_values_dict_200[subs] = std_values_200
+#         std_values_dict_300[subs] = std_values_300
         
 
-    # Plot Mean F1_score values against the repetitions for each subject
-    plt.plot(range(5), evals_avg_66_200['F1_score'], marker='o', markersize=4, label='Subject 4', color='blue', linewidth=1.3) 
-    plt.plot(range(5), evals_avg_69_200['F1_score'], marker='o', markersize=4, label='Subject 7', color='green', linewidth=1.3)
-    plt.plot(range(5), evals_avg_71_200['F1_score'], marker='o', markersize=4, label='Subject 9', color='red', linewidth=1.3) 
+#     # Plot Mean Accuracy values against the repetitions for each subject
+#     plt.plot(range(5), evals_avg_66_200['Accuracy'], marker='o', markersize=4, label='Subject 4', color='blue', linewidth=1.3) 
+#     plt.plot(range(5), evals_avg_69_200['Accuracy'], marker='o', markersize=4, label='Subject 7', color='green', linewidth=1.3)
+#     plt.plot(range(5), evals_avg_71_200['Accuracy'], marker='o', markersize=4, label='Subject 9', color='red', linewidth=1.3) 
     
-    plt.plot(range(5), evals_avg_66_300['F1_score'], marker='o', markersize=4, linestyle='--', color='blue', linewidth=1.3) 
-    plt.plot(range(5), evals_avg_69_300['F1_score'], marker='o', markersize=4, linestyle='--', color='green', linewidth=1.3) 
-    plt.plot(range(5), evals_avg_71_300['F1_score'], marker='o', markersize=4, linestyle='--', color='red', linewidth=1.3)
+#     plt.plot(range(5), evals_avg_66_300['Accuracy'], marker='o', markersize=4, linestyle='--', color='blue', linewidth=1.3) 
+#     plt.plot(range(5), evals_avg_69_300['Accuracy'], marker='o', markersize=4, linestyle='--', color='green', linewidth=1.3) 
+#     plt.plot(range(5), evals_avg_71_300['Accuracy'], marker='o', markersize=4, linestyle='--', color='red', linewidth=1.3)
     
-    errorbar_xvals = [1, 2, 3, 4]   # To not plot errorbar for std = 0 when no retrain performed
+#     errorbar_xvals = [1, 2, 3, 4]   # To not plot errorbar for std = 0 when no retrain performed
     
-    plt.errorbar(errorbar_xvals, evals_avg_66_200['F1_score'].iloc[errorbar_xvals], yerr=[std_values_dict_200[66][i] for i in errorbar_xvals], fmt='none', ecolor='blue', capsize=5, linewidth=1.3)
-    plt.errorbar(errorbar_xvals, evals_avg_69_200['F1_score'].iloc[errorbar_xvals], yerr=[std_values_dict_200[69][i] for i in errorbar_xvals], fmt='none', ecolor='green', capsize=5, linewidth=1.3)
-    plt.errorbar(errorbar_xvals, evals_avg_71_200['F1_score'].iloc[errorbar_xvals], yerr=[std_values_dict_200[71][i] for i in errorbar_xvals], fmt='none', ecolor='red', capsize=5, linewidth=1.3)
+#     plt.errorbar(errorbar_xvals, evals_avg_66_200['Accuracy'].iloc[errorbar_xvals], yerr=[std_values_dict_200[66][i] for i in errorbar_xvals], fmt='none', ecolor='blue', capsize=5, linewidth=1.3)
+#     plt.errorbar(errorbar_xvals, evals_avg_69_200['Accuracy'].iloc[errorbar_xvals], yerr=[std_values_dict_200[69][i] for i in errorbar_xvals], fmt='none', ecolor='green', capsize=5, linewidth=1.3)
+#     plt.errorbar(errorbar_xvals, evals_avg_71_200['Accuracy'].iloc[errorbar_xvals], yerr=[std_values_dict_200[71][i] for i in errorbar_xvals], fmt='none', ecolor='red', capsize=5, linewidth=1.3)
     
-    plt.errorbar(errorbar_xvals, evals_avg_66_300['F1_score'].iloc[errorbar_xvals], yerr=[std_values_dict_300[66][i] for i in errorbar_xvals], fmt='none', ecolor='blue', capsize=5, linewidth=1.3)
-    plt.errorbar(errorbar_xvals, evals_avg_69_300['F1_score'].iloc[errorbar_xvals], yerr=[std_values_dict_300[69][i] for i in errorbar_xvals], fmt='none', ecolor='green', capsize=5, linewidth=1.3)
-    plt.errorbar(errorbar_xvals, evals_avg_71_300['F1_score'].iloc[errorbar_xvals], yerr=[std_values_dict_300[71][i] for i in errorbar_xvals], fmt='none', ecolor='red', capsize=5, linewidth=1.3)
+#     plt.errorbar(errorbar_xvals, evals_avg_66_300['Accuracy'].iloc[errorbar_xvals], yerr=[std_values_dict_300[66][i] for i in errorbar_xvals], fmt='none', ecolor='blue', capsize=5, linewidth=1.3)
+#     plt.errorbar(errorbar_xvals, evals_avg_69_300['Accuracy'].iloc[errorbar_xvals], yerr=[std_values_dict_300[69][i] for i in errorbar_xvals], fmt='none', ecolor='green', capsize=5, linewidth=1.3)
+#     plt.errorbar(errorbar_xvals, evals_avg_71_300['Accuracy'].iloc[errorbar_xvals], yerr=[std_values_dict_300[71][i] for i in errorbar_xvals], fmt='none', ecolor='red', capsize=5, linewidth=1.3)
 
-    # plt.legend()
-    # plt.text(x=-0.1, y = 0.70, s='Window 200', color='black', bbox=dict(facecolor='white', alpha=0.5))
-    # plt.text(x=-0.1, y = 0.62, s='Window 300', color='black', bbox=dict(facecolor='white', alpha=0.5))
+#     # plt.legend()
+#     # plt.text(x=-0.1, y = 0.70, s='Window 200', color='black', bbox=dict(facecolor='white', alpha=0.5))
+#     # plt.text(x=-0.1, y = 0.62, s='Window 300', color='black', bbox=dict(facecolor='white', alpha=0.5))
     
-    # Primary legend for subjects
-    subject_legend = plt.legend(loc='upper left')
+#     # Primary legend for subjects
+#     subject_legend = plt.legend(loc='upper left')
 
-    # Custom legend entries for window types
-    from matplotlib.lines import Line2D
-    custom_lines = [Line2D([0], [0], color='black', lw=1.3, linestyle='-'),
-                    Line2D([0], [0], color='black', lw=1.3, linestyle='--')]
+#     # Custom legend entries for window types
+#     from matplotlib.lines import Line2D
+#     custom_lines = [Line2D([0], [0], color='black', lw=1.3, linestyle='-'),
+#                     Line2D([0], [0], color='black', lw=1.3, linestyle='--')]
 
-    # Adding the secondary legend
-    window_legend = plt.legend(custom_lines, ['Window 200', 'Window 300'], loc='upper right', bbox_to_anchor=(0.255, 0.81), fontsize='small')
-    plt.gca().add_artist(subject_legend)
+#     # Adding the secondary legend
+#     window_legend = plt.legend(custom_lines, ['Window 200', 'Window 300'], loc='upper right', bbox_to_anchor=(0.255, 0.81), fontsize='small')
+#     plt.gca().add_artist(subject_legend)
 
-    plt.xlabel('Number of Repetitions used for training')
-    plt.ylabel("F1_score")
-    plt.xticks(range(5))
-    plt.grid(True)
-    # plt.show()
-    plt.savefig(f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/{filename}_plot_3_amputee.png')
-    plt.close()
-
+#     plt.xlabel('Number of Repetitions used for training')
+#     plt.ylabel("Accuracy")
+#     plt.xticks(range(5))
+#     plt.grid(True)
+#     # plt.show()
+#     plt.savefig(f'{database}/{TRAIN_TYPE}/Cross_{SPLIT}/TL/{FREEZE}/{filename}_plot_3_amputee.png')
+#     plt.close()
