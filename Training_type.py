@@ -260,7 +260,7 @@ def pre_train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, 
 
 # Train_Triplet
 def train_model_triplet(model, loss_fun, optimizer, dataloaders, scheduler, num_epochs=100, precision=1e-8,
-                        patience=10, patience_increase=10, device=None, margin=1, p_dist=2, beta=1):
+                        patience=10, patience_increase=10, device=None, margin=1, p_dist=2, beta=1.0):
     if not device:
         if torch.cuda.is_available():
             device = torch.device('cuda')
@@ -467,18 +467,23 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                 sub = sub.type(torch.LongTensor).to(device)
                 # print(f'LABEL: {labels[0]}      SUB:{sub[0]}')
                 if phase == 'train':
-                    p = float(epoch * tot_batch) / num_epochs / tot_batch
+                    
+                    # Increasing domain loss 
+                    # p = float(epoch * tot_batch) / num_epochs / tot_batch
 
-                    if epoch > alpha_start:
-                        # alpha = 2. / (1. + np.exp(-10 * p)) - 1
-                        alpha = 1
-                    else:
-                        alpha = 0
+                    # if epoch >= alpha_start:
+                    #     alpha = 2. / (1. + np.exp(-10 * p)) - 1
+                    #     # alpha = 1
+                    # else:
+                    #     alpha = 0
+                        
+                    # Decreasing or increasing domain loss with decays
+                    alpha = get_exponential_function(epoch, num_epochs, alpha_start=0.5, alpha_lim=1.5, fraction=0.3)
                     
 
                     model.train()
 
-                    outputs, out_domain = model.forward(inputs, alpha)
+                    outputs, out_domain = model.forward(inputs, alpha=alpha)
                     # print(f'O1: {outputs.shape}     O2: {out_domain.shape}')
                     outputs_softmax = softmax_block(outputs)
 
@@ -490,7 +495,11 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
 
                     loss_task = loss_fun(outputs, labels)
                     loss_domain = loss_fun_domain(out_domain, sub)
-                    loss = loss_task + (lamba * loss_domain)
+                    
+                    # loss = loss_task + lamba * (1/(1 + loss_domain))
+                    # Use a weighted average 
+                    loss = (1 - lamba) * loss_task + lamba * (1 / (1 + loss_domain))
+
                     loss.backward()
                     optimizer.step()
 
@@ -503,7 +512,7 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                     model.eval()
                     with torch.no_grad():
                         # forward
-                        outputs, out_domain = model(inputs, alpha)
+                        outputs, out_domain = model(inputs, alpha=alpha)
 
                         outputs_softmax = softmax_block(outputs)
                         outputs_np = outputs_softmax.cpu().data.numpy()
@@ -521,15 +530,16 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                             # over the domain, infact, at the very beginning, with alpha zero, the invariant feature are not
                             # learned, so the model will have a lower TOTAL validation loss
                             # if alpha > 0.8:   # alpha > 0.8 -->  with 100 epochs and alpha_start = 0 it starts to count domain loss at epoch 22
-                            loss = loss_task - (lamba * loss_domain)  
-                            # We use the minus symbol because, when using the combination of them, while the task valid loss it is suppose to go down,
-                            # the domain val loss is suspposed to grow, as the model reverse the gradient. In this to avoid the model to stop a the 
-                            # very early epochs.
+                            # loss = loss_task + lamba * (1/(1 + loss_domain))
+                            loss = (1 - lamba) * loss_task + lamba * (1 / (1 + loss_domain))
+
 
                         else:
                             loss = loss_task
                         
                         
+                task_loss_contribution = ((1 - lamba) * loss_task.item()) / loss.item()
+                domain_loss_contribution = ((lamba * (1 / (1 + loss_domain.item()))) / loss.item()) * alpha
 
                 loss_accumulator = loss_accumulator + ((1 / (total + 1)) * (loss.item() - loss_accumulator))
                 domain_loss_acc = domain_loss_acc + ((1 / (total + 1)) * (loss_domain.item() - domain_loss_acc))
@@ -537,10 +547,12 @@ def train_model_reversal_gradient(model, loss_fun, optimizer, dataloaders, sched
                 total = total + 1
 
                 acc = metrics.accuracy_score(y_true=y_true, y_pred=y_pred)
-                kappa = metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights='quadratic')
-                print(phase + " -> loss: {:0.5f}".format(loss_accumulator) + ", accuracy: {:0.5f}".format(acc) +
-                      ", kappa score: {:0.4f}".format(kappa) + ", dom_loss: {:0.4f}".format(domain_loss_acc) + 
-                      f', Epoch: -> {epoch} / {num_epochs}  Batch Number: -> {cc} / {tot_batch}')
+                # kappa = metrics.cohen_kappa_score(y1=y_true, y2=y_pred, weights='quadratic')
+                print(phase + " -> loss: {:0.5f}".format(loss_accumulator) + ", accuracy: {:0.5f}".format(acc) + \
+                    ", task_loss_contrib: {:0.4f}".format(task_loss_contribution) + 
+                    ", dom_loss_contrib: {:0.4f}".format(domain_loss_contribution) + \
+                        ", task_loss: {:0.4f}".format(task_loss_acc) + ", dom_loss: {:0.4f}".format(domain_loss_acc) + 
+                    f', Epoch: -> {epoch} / {num_epochs}  Batch Number: -> {cc} / {tot_batch}')
 
             if phase == 'train':
                 tr_epoch_loss.append(loss_accumulator)
@@ -938,3 +950,51 @@ def get_l2_regularization(model, lambda_l2):
         l2_reg += torch.norm(param, p=2).pow(2)
     l2_reg *= lambda_l2
     return l2_reg
+
+import numpy as np
+
+import numpy as np
+
+#%%
+import numpy as np
+
+def get_exponential_function(epoch, num_epochs, alpha_start=1.0, alpha_lim=0.25, fraction=2/3):
+    """
+    Calculate an exponentially decaying or increasing alpha value based on the comparison of alpha_start and alpha_lim.
+    If alpha_start > alpha_lim, it decays from alpha_start to alpha_lim. If alpha_start < alpha_lim, it increases
+    from alpha_start to alpha_lim after a specified fraction of total epochs.
+    
+    Parameters:
+    - epoch: The current epoch (starting from 0).
+    - num_epochs: The total number of epochs.
+    - alpha_start: The initial value of alpha at the start of training.
+    - alpha_lim: The target value of alpha at the end of decay or increase.
+    - fraction: The fraction of total epochs by which alpha should reach alpha_lim (default is 2/3).
+    
+    Returns:
+    - alpha: The calculated alpha value for the current epoch.
+    """
+    
+    # Calculate the number of epochs over which the transition should occur
+    transition_epochs = fraction * num_epochs
+    
+    # Determine if we are decaying or increasing based on the comparison of alpha_start and alpha_lim
+    if alpha_start > alpha_lim:
+        # Decaying from alpha_start to alpha_lim
+        decay_rate = np.log(alpha_start / alpha_lim) / transition_epochs
+        alpha = alpha_start * np.exp(-decay_rate * epoch)
+        
+        
+        # Ensure alpha doesn't drop below alpha_lim
+        alpha = max(alpha, alpha_lim)
+    
+    else:
+        # Increasing from alpha_start to alpha_lim
+        increase_rate = np.log(alpha_lim / alpha_start) / transition_epochs
+        # alpha = alpha_start + (alpha_lim - alpha_start) * (1 - np.exp(-increase_rate * epoch))
+        alpha = alpha_start * np.exp(increase_rate * epoch)
+        
+        # Ensure alpha doesn't exceed alpha_lim
+        alpha = min(alpha, alpha_lim)
+    
+    return alpha
