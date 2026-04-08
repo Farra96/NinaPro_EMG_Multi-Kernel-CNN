@@ -11,13 +11,16 @@ This GitHub repository accounts for studying sEMG classification algorithms tail
   - Triplet margin loss
   - Adversarial Network with Reversal Gradient
   - JS Divergence and Center Loss function.
-- A more complex model that includes CBAM, featuring TCN, Feature Spatial Attention Module, and Feature Channel Attention Module from 
+- A more complex model that includes CBAM, featuring TCN, Feature Spatial Attention Module, and Feature Channel Attention Module
 - A framework for testing the effect of Transfer Learning on new users varying the number of data available.
 
 
 The files Data_Processing_Utils, DATALOADERS, Training_type and MODELS contain the function used in the 2 following files.
+
 The file DBX_Processing refers to how the data has been unpacked and structured in Pandas dataframe.
+
 The file General_Models is the script used to run different training from prompt choosing configuration.
+
 The file General_TL is the script used to run different Transfer Learning framework from prompt with custom configuration.
 
 
